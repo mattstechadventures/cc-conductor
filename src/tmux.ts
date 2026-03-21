@@ -24,8 +24,11 @@ export function createTmuxSession(sessionName: string, workDir: string): void {
 }
 
 export function sendKeys(sessionName: string, command: string): void {
-  // Use tmux send-keys with literal string to avoid shell interpretation issues
-  exec(`tmux send-keys -t ${quote(sessionName)} ${quote(command)} Enter`, 0);
+  // Send text and Enter separately — Claude Code's TUI on macOS drops Enter
+  // when it arrives in the same tmux send-keys call as a long string of characters.
+  exec(`tmux send-keys -t ${quote(sessionName)} ${quote(command)}`, 0);
+  execSync('sleep 0.15', { encoding: 'utf-8' });
+  exec(`tmux send-keys -t ${quote(sessionName)} Enter`, 0);
   logger.info(`Sent keys to ${sessionName}: ${command.substring(0, 80)}...`);
 }
 

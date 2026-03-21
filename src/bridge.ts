@@ -113,9 +113,11 @@ async function tick(state: BridgeState, discordClient: Client): Promise<void> {
     state.sawOutput = true;
   }
 
-  // Check if Claude is back at the prompt (done responding)
+  // Check if Claude is back at the prompt (done responding).
+  // Use last 12 lines — the status bar on Mac can be 6+ lines
+  // (separator, status, mode, update banner, blanks).
   const lines = pane.trimEnd().split('\n');
-  const lastFewLines = lines.slice(-5).join('\n');
+  const lastFewLines = lines.slice(-12).join('\n');
   const atPrompt = lastFewLines.includes('❯') &&
     !lastFewLines.includes('Running') &&
     !lastFewLines.includes('Waiting') &&
@@ -158,8 +160,9 @@ function extractResponse(pane: string, sentMessage: string): string | null {
 
     // Start collecting after we see Claude's output marker.
     // Different Claude Code versions use different bullet characters:
-    //   ⏺ (U+23FA), ● (U+25CF), ⏵ (U+23F5), ○ (U+25CB), • (U+2022)
-    const OUTPUT_MARKERS = ['⏺', '●', '⏵', '○', '•'];
+    //   ⏺ (U+23FA), ● (U+25CF), ○ (U+25CB), • (U+2022)
+    // Note: ⏵ (U+23F5) is excluded — it appears in the status bar ("⏵⏵ accept edits on")
+    const OUTPUT_MARKERS = ['⏺', '●', '○', '•'];
     if (!started && OUTPUT_MARKERS.some(m => trimmed.startsWith(m))) {
       started = true;
     }

@@ -9,9 +9,10 @@ import {
   getActiveSessions, updateSessionStatus, updateSessionActivity,
   deleteSession, markInterrupted,
 } from './sessions.js';
-import { createTmuxSession, sendKeys, killTmuxSession, tmuxSessionExists, getSessionPid } from './tmux.js';
+import { createTmuxSession, sendKeys, sendEnter, killTmuxSession, tmuxSessionExists, getSessionPid, capturePaneOutput } from './tmux.js';
 import { buildClaudeCommand } from './pairing.js';
 import { resumeSession } from './resume.js';
+import { startBridge, stopBridge } from './bridge.js';
 import { logger } from './logger.js';
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
@@ -104,30 +105,40 @@ export function createDaemon(deps: DaemonDeps): express.Express {
       createTmuxSession(session.tmuxSession, session.projectDir);
 
       // Build and send the claude command
-      const claudeCmd = buildClaudeCommand(session, body.resumeFromCheckpoint);
+      const claudeCmd = buildClaudeCommand(session);
       sendKeys(session.tmuxSession, claudeCmd);
 
-      // Poll for plugin startup (check for the "is live" message in the Discord channel)
+      // Wait for Claude Code to start, handle workspace trust prompt
       const startedAt = Date.now();
       const timeoutMs = 30_000;
       let ready = false;
 
       while (Date.now() - startedAt < timeoutMs) {
         await new Promise(resolve => setTimeout(resolve, 2000));
-        try {
-          const messages = await channel.messages.fetch({ limit: 5 });
-          if (messages.some(m => m.content.includes('is live'))) {
-            ready = true;
-            break;
-          }
-        } catch {
-          // Channel might not be ready yet
+        const pane = capturePaneOutput(session.tmuxSession, 30);
+
+        // Auto-accept workspace trust prompt
+        if (pane.includes('Yes, I trust this folder') || pane.includes('Enter to confirm')) {
+          sendEnter(session.tmuxSession);
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          continue;
+        }
+
+        // Check if Claude Code is at the prompt (❯)
+        if (pane.includes('❯')) {
+          ready = true;
+          break;
         }
       }
 
-      // Update status
+      // Update status and start the bridge
       const pid = getSessionPid(session.tmuxSession);
       updateSessionStatus(session.id, ready ? 'active' : 'starting', pid ?? undefined);
+
+      if (ready) {
+        startBridge(session, discordClient);
+        await channel.send(`✓ Session **${session.name}** is live. Claude Code is running in \`${session.projectDir}\`.`);
+      }
 
       const updated = getSession(session.id)!;
       res.json({ ok: true, data: updated } as DaemonResponse<Session>);
@@ -146,7 +157,8 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         return;
       }
 
-      // Kill tmux session
+      // Stop bridge and kill tmux session
+      stopBridge(session.id);
       killTmuxSession(session.tmuxSession);
 
       // Handle Discord channel

@@ -55,13 +55,17 @@ export async function resumeSession(session: Session, discordClient: Client): Pr
   // 6. Create new tmux session
   createTmuxSession(session.tmuxSession, session.projectDir);
 
-  // 7. Write resume prompt file
+  // 7. Write resume context to a file Claude can read
   const resumePromptPath = path.join(session.projectDir, RESUME_PROMPT_FILENAME);
   fs.writeFileSync(resumePromptPath, resumePrompt);
 
-  // 8. Spawn Claude Code with plugin + resume prompt
-  const cmd = buildClaudeCommand(session, resumePromptPath);
+  // 8. Spawn Claude Code with the resume file as the initial prompt
+  const cmd = buildClaudeCommand(session);
   sendKeys(session.tmuxSession, cmd);
+
+  // Wait for Claude Code to be ready, then tell it to read the resume context
+  await waitForPrompt(session.tmuxSession, 30_000);
+  sendKeys(session.tmuxSession, `Read ${RESUME_PROMPT_FILENAME} and resume the session described in it. Acknowledge what you were working on.`);
 
   // 9. Update session state
   incrementResumeCount(session.id);
@@ -244,6 +248,22 @@ async function fetchRecentMessages(
       }));
   } catch {
     return [];
+  }
+}
+
+async function waitForPrompt(tmuxSession: string, timeoutMs: number): Promise<void> {
+  const { capturePaneOutput, sendEnter } = await import('./tmux.js');
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    const pane = capturePaneOutput(tmuxSession, 30);
+    // Auto-accept workspace trust prompt
+    if (pane.includes('Yes, I trust this folder') || pane.includes('Enter to confirm')) {
+      sendEnter(tmuxSession);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      continue;
+    }
+    if (pane.includes('❯')) return;
   }
 }
 

@@ -29,6 +29,10 @@ export function sendKeys(sessionName: string, command: string): void {
   logger.info(`Sent keys to ${sessionName}: ${command.substring(0, 80)}...`);
 }
 
+export function sendEnter(sessionName: string): void {
+  exec(`tmux send-keys -t ${quote(sessionName)} Enter`, 0);
+}
+
 export function killTmuxSession(sessionName: string): void {
   try {
     exec(`tmux kill-session -t ${quote(sessionName)}`, 0);

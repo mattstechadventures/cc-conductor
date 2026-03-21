@@ -6,6 +6,7 @@ import { createDaemon, startHealthMonitor, stopHealthMonitor } from './daemon.js
 import { reconcileOnStartup } from './resume.js';
 import { startCheckpointScheduler, stopCheckpointScheduler, flushAllCheckpoints } from './checkpoint.js';
 import { killTmuxSession } from './tmux.js';
+import { stopAllBridges } from './bridge.js';
 import { logger } from './logger.js';
 
 // Validate required env vars
@@ -117,9 +118,10 @@ async function main(): Promise<void> {
       // Best effort
     }
 
-    // Stop timers
+    // Stop timers and bridges
     stopHealthMonitor();
     stopCheckpointScheduler();
+    stopAllBridges();
 
     // Kill all active tmux sessions
     const activeSessions = getActiveSessions();

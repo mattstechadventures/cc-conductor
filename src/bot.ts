@@ -5,6 +5,7 @@ import {
 } from 'discord.js';
 import type { Session, DaemonResponse, ResumeResult } from './types.js';
 import { getSessionByChannelId, getSessionByName, getInterruptedSessions } from './sessions.js';
+import { sendToSession } from './bridge.js';
 import { logger } from './logger.js';
 
 const API_BASE = () => `http://localhost:${process.env.CONDUCTOR_API_PORT || '7842'}`;
@@ -78,14 +79,10 @@ export async function setupBot(client: Client): Promise<void> {
       return;
     }
 
-    // Check if this is a session channel — ping activity
+    // Check if this is a session channel — relay to Claude Code
     const session = getSessionByChannelId(message.channel.id);
-    if (session) {
-      try {
-        await fetch(`${API_BASE()}/sessions/${session.id}/ping`, { method: 'POST' });
-      } catch {
-        // Best effort
-      }
+    if (session && (session.status === 'active' || session.status === 'starting')) {
+      sendToSession(session, message.content);
     }
   });
 }

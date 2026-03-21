@@ -18,6 +18,7 @@ import { logger } from './logger.js';
 import { writeJsonFile } from './state.js';
 import { analyzeTerminalOutput } from './worker-prompts.js';
 import type {
+  AgentBackend,
   Session,
   TerminalBackend,
   WorkerHeartbeat,
@@ -46,6 +47,7 @@ const resumePromptPath = process.env.CONDUCTOR_RESUME_PROMPT_PATH || '';
 const structuredTransport = process.env.CONDUCTOR_STRUCTURED_TRANSPORT === 'channel';
 const configuredBackend = (process.env.CONDUCTOR_TERMINAL_BACKEND as TerminalBackend | undefined) || 'pty';
 const terminalBackend: TerminalBackend = configuredBackend === 'tmux' ? 'tmux' : 'pty';
+const activeBackend = (process.env.CONDUCTOR_ACTIVE_BACKEND as AgentBackend | undefined) || 'claude';
 const tmuxSessionName = process.env.CONDUCTOR_TMUX_SESSION || `conductor-${sessionName}`;
 
 const session: Session = {
@@ -70,6 +72,8 @@ const session: Session = {
   terminalHandle: terminalBackend === 'tmux' ? tmuxSessionName : null,
   transportKind: structuredTransport ? 'channel' : 'pty_fallback',
   transportState: 'disconnected',
+  activeBackend,
+  backendStates: [],
   claudeSessionName,
   claudeResumeRef,
   workerStatus: 'starting',
@@ -128,6 +132,7 @@ async function main(): Promise<void> {
           workerId,
           workerStatus,
           ready,
+          activeBackend,
           terminalBackend,
           terminalHandle: getTerminalHandle(),
           claudePid: getClaudePid(),
@@ -367,6 +372,7 @@ async function registerWithDaemon(): Promise<void> {
     port: serverPort,
     pid: process.pid,
     claudePid: getClaudePid(),
+    activeBackend,
     terminalHandle: getTerminalHandle(),
     terminalBackend,
     workerStatus,
@@ -394,6 +400,7 @@ async function heartbeat(): Promise<void> {
     port: serverPort,
     pid: process.pid,
     claudePid: getClaudePid(),
+    activeBackend,
     terminalHandle: getTerminalHandle(),
     terminalBackend,
     workerStatus,
@@ -417,6 +424,7 @@ function writeStateFile(): void {
     port: serverPort || null,
     pid: process.pid,
     claudePid: getClaudePid(),
+    activeBackend,
     terminalBackend,
     terminalHandle: getTerminalHandle(),
     workerStatus,

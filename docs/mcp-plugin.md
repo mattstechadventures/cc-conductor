@@ -1,6 +1,6 @@
-# MCP Plugin
+# CC Conductor MCP Plugin
 
-Conductor’s supported structured path now uses the generated Node server in `src/channel-server.ts`.
+CC Conductor’s supported structured path now uses the generated Node server in `src/channel-server.ts`.
 
 The `plugin/discord-autopair/` directory is kept only as a legacy experimental reference. It is not the supported production path.
 
@@ -9,7 +9,7 @@ The `plugin/discord-autopair/` directory is kept only as a legacy experimental r
 ```mermaid
 %%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
 flowchart LR
-    Daemon[Conductor Daemon] --> Register[Register Local MCP Entry]
+    Daemon[CC Conductor Daemon] --> Register[Register Local MCP Entry]
     Register --> Claude[Claude Code]
     Claude --> Channel[Generated Channel Server]
     Channel --> Daemon

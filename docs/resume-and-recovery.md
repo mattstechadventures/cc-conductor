@@ -1,4 +1,4 @@
-# Resume And Recovery
+# CC Conductor Resume And Recovery
 
 ## Visual Overview
 
@@ -43,10 +43,10 @@ No session context is lost in this case.
 Resume order:
 
 1. `claude --resume <stable-session-name>`
-2. If that fails, Conductor writes a resume prompt and injects it through the channel path
+2. If that fails, CC Conductor writes a resume prompt and injects it through the channel path
 
 Each fresh worker spawn also re-registers the session-scoped local MCP entry before Claude launches, so resumes do not depend on stale `--mcp-config` state from previous workers.
-The same restart/resume path is also used when Conductor needs to relaunch Claude with updated `--add-dir` access for an existing session.
+The same restart/resume path is also used when CC Conductor needs to relaunch Claude with updated `--add-dir` access for an existing session.
 
 If both resume paths fail, the session stays interrupted and the error points to the worker diagnostic files under `data/sessions/<sessionId>/`.
 
@@ -58,7 +58,7 @@ If both resume paths fail, the session stays interrupted and the error points to
 
 Set `COMMAND_PREFIX` to change the prefix. With the default config, `<prefix>` is `/`.
 
-Conductor also fails fast at startup if Claude Code is older than `2.1.80` or if the legacy DB schema still requires `tmux_session NOT NULL`.
+CC Conductor also fails fast at startup if Claude Code is older than `2.1.80` or if the legacy DB schema still requires `tmux_session NOT NULL`.
 
 ## Resume Context
 

@@ -1,4 +1,4 @@
-import type { ChannelQueuedEvent, WorkerHeartbeat, WorkerRegistration } from './types.js';
+import type { AgentBackend, ChannelQueuedEvent, WorkerHeartbeat, WorkerRegistration } from './types.js';
 
 export interface WorkerRuntime extends WorkerRegistration {
   lastHeartbeatAt: number;
@@ -14,6 +14,11 @@ interface SessionRuntimeState {
   channel: ChannelRuntime | null;
   queuedEvents: ChannelQueuedEvent[];
   waiters: Array<(event: ChannelQueuedEvent | null) => void>;
+  turn: {
+    locked: boolean;
+    backend: AgentBackend | null;
+    startedAt: number | null;
+  };
 }
 
 const runtimes = new Map<string, SessionRuntimeState>();
@@ -26,6 +31,11 @@ function getOrCreateRuntime(sessionId: string): SessionRuntimeState {
       channel: null,
       queuedEvents: [],
       waiters: [],
+      turn: {
+        locked: false,
+        backend: null,
+        startedAt: null,
+      },
     };
     runtimes.set(sessionId, state);
   }
@@ -153,4 +163,31 @@ export async function waitForWorkerRegistrations(
     if (pending.size === 0) break;
     await new Promise(resolve => setTimeout(resolve, 500));
   }
+}
+
+export function beginSessionTurn(sessionId: string, backend: AgentBackend): boolean {
+  const state = getOrCreateRuntime(sessionId);
+  if (state.turn.locked) {
+    return false;
+  }
+
+  state.turn = {
+    locked: true,
+    backend,
+    startedAt: Date.now(),
+  };
+  return true;
+}
+
+export function endSessionTurn(sessionId: string): void {
+  const state = getOrCreateRuntime(sessionId);
+  state.turn = {
+    locked: false,
+    backend: null,
+    startedAt: null,
+  };
+}
+
+export function isSessionTurnLocked(sessionId: string): boolean {
+  return getOrCreateRuntime(sessionId).turn.locked;
 }

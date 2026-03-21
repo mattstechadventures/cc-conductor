@@ -1,4 +1,4 @@
-# Message Bridge
+# CC Conductor Message Bridge
 
 The supported bridge is structured, not scraped.
 
@@ -35,7 +35,7 @@ flowchart LR
 For active sessions with a connected channel server:
 
 1. A Discord message arrives in a session channel.
-2. Conductor registers a session-specific local-scope MCP server in Claude Code for that project.
+2. CC Conductor registers a session-specific local-scope MCP server in Claude Code for that project.
 3. The daemon queues a `notifications/claude/channel` event for that session.
 4. Claude launches with the session's persisted `additionalDirs` as `--add-dir` arguments.
 5. Claude loads the registered channel server through `--dangerously-load-development-channels server:<session-server-name>`.

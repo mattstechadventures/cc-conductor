@@ -1,4 +1,4 @@
-# Conductor Setup
+# CC Conductor Setup
 
 ## Visual Overview
 
@@ -45,7 +45,7 @@ Claude Code must already be authenticated with a `claude.ai` account:
 claude
 ```
 
-Conductor rejects Claude Code older than `2.1.80` at startup.
+CC Conductor rejects Claude Code older than `2.1.80` at startup.
 
 ## 2. Discord Bot
 
@@ -96,6 +96,9 @@ TERMINAL_BACKEND=pty
 STRUCTURED_TRANSPORT=channel
 SESSION_RECONNECT_GRACE_MS=15000
 CLAUDE_BIN=claude
+DEFAULT_AGENT_BACKEND=claude
+ENABLED_AGENT_BACKENDS=claude
+CODEX_BIN=codex
 SESSION_IDLE_TIMEOUT_MINS=120
 CHECKPOINT_INTERVAL_MINS=15
 CHECKPOINT_DISCORD_MESSAGES=50
@@ -107,6 +110,10 @@ INDICATOR_MODE=typing
 `TERMINAL_BACKEND=pty` is the supported path. `tmux` is legacy only.
 
 `STRUCTURED_TRANSPORT=channel` is the supported path. It uses a generated Node MCP channel server and the Claude development-channel flag internally.
+
+`DEFAULT_AGENT_BACKEND`, `ENABLED_AGENT_BACKENDS`, and `CODEX_BIN` control which agent CLI backend is selected when a session starts. The existing `CONDUCTOR_*` environment variables remain unchanged for compatibility.
+
+Compatibility note: the repository/package slug remains `cc-conductor`.
 
 Set `COMMAND_PREFIX` if `/` is already claimed by another bot. For example, `COMMAND_PREFIX=!` makes the control-plane commands `!help`, `!new`, and so on.
 
@@ -132,7 +139,7 @@ Expected startup shape:
 ## 6. Verify
 
 1. Open your Discord server.
-2. Confirm the `Conductor` category and the channel named by `ORCHESTRATOR_CHANNEL_NAME` exist (default `#orchestrator`).
+2. Confirm the `CC Conductor` category and the channel named by `ORCHESTRATOR_CHANNEL_NAME` exist (default `#orchestrator`).
 3. Run `<prefix>help` (default `/help`).
 4. Run `<prefix>new test-session` (default `/new test-session`).
 5. Confirm a `#test-session` channel appears and Claude replies arrive in Discord.
@@ -151,6 +158,7 @@ The daemon can restart without terminating live session workers.
 | Missing required environment variable | Fill in the three required Discord values |
 | Bot does not respond | Verify token, guild ID, invite permissions, and Message Content Intent |
 | `claude` not found | Set `CLAUDE_BIN` to the absolute Claude Code path |
+| `codex` not found | Set `CODEX_BIN` to the absolute Codex CLI path |
 | Sessions start but do not answer | Verify Claude Code is authenticated and Channels are available in your Claude Code environment |
 | Session falls back to PTY | The structured channel server is disconnected; inspect daemon logs and worker state under `data/sessions/<id>/` |
 | Startup fails on Claude version | Upgrade Claude Code to `2.1.80+` and confirm `claude --version` |

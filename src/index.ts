@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { TextChannel } from 'discord.js';
 import { createDiscordClient, getConductorCategory, setupBot } from './bot.js';
+import { getBackendAdapter, getBackendDisplayName, parseEnabledAgentBackends } from './agent-backends.js';
 import { stopAllBridges } from './bridge.js';
 import { flushAllCheckpoints, startCheckpointScheduler, stopCheckpointScheduler } from './checkpoint.js';
 import { createDaemon, startHealthMonitor, stopHealthMonitor } from './daemon.js';
@@ -8,7 +9,6 @@ import { logger } from './logger.js';
 import { reconcileOnStartup } from './resume.js';
 import { closeDb, getActiveSessions, getSessionByName, initDb } from './sessions.js';
 import { waitForWorkerRegistrations } from './runtime-state.js';
-import { validateClaudeCli } from './claude-cli.js';
 
 const REQUIRED_VARS = ['DISCORD_BOT_TOKEN', 'DISCORD_CLIENT_ID', 'DISCORD_GUILD_ID'];
 
@@ -20,11 +20,22 @@ for (const variable of REQUIRED_VARS) {
 }
 
 async function main(): Promise<void> {
-  logger.info('Conductor starting...');
+  logger.info('CC Conductor starting...');
   initDb();
-  const claude = validateClaudeCli();
-  process.env.CONDUCTOR_RESOLVED_CLAUDE_BIN = claude.resolvedPath;
-  logger.info(`Validated Claude Code ${claude.versionText} at ${claude.resolvedPath}`);
+  for (const backend of parseEnabledAgentBackends()) {
+    const validation = getBackendAdapter(backend).validate(process.env) as {
+      resolvedPath: string;
+      versionText?: string;
+    };
+    if (backend === 'claude') {
+      process.env.CONDUCTOR_RESOLVED_CLAUDE_BIN = validation.resolvedPath;
+    } else if (backend === 'codex') {
+      process.env.CONDUCTOR_RESOLVED_CODEX_BIN = validation.resolvedPath;
+    }
+    logger.info(
+      `Validated ${getBackendDisplayName(backend)} ${validation.versionText || ''} at ${validation.resolvedPath}`.trim()
+    );
+  }
 
   const client = createDiscordClient();
   await new Promise<void>((resolve, reject) => {
@@ -83,7 +94,7 @@ async function main(): Promise<void> {
           entry => entry.name === orchestratorName && entry.isTextBased()
         ) as TextChannel | undefined;
         if (channel) {
-          await channel.send('Conductor is going offline. Existing session workers will continue running and reconnect when the daemon returns.');
+          await channel.send('CC Conductor is going offline. Existing session workers will continue running and reconnect when the daemon returns.');
         }
       }
     } catch {
@@ -115,7 +126,7 @@ async function main(): Promise<void> {
     void shutdown('SIGINT');
   });
 
-  logger.info('Conductor is fully operational.');
+  logger.info('CC Conductor is fully operational.');
 }
 
 main().catch((err) => {

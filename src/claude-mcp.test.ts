@@ -30,6 +30,8 @@ const baseSession: Session = {
   terminalHandle: null,
   transportKind: 'channel',
   transportState: 'disconnected',
+  activeBackend: 'claude',
+  backendStates: [],
   claudeSessionName: 'test5',
   claudeResumeRef: 'test5',
   workerStatus: 'starting',

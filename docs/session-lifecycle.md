@@ -1,4 +1,4 @@
-# Session Lifecycle
+# CC Conductor Session Lifecycle
 
 ## Visual Overview
 
@@ -42,13 +42,14 @@ flowchart TD
 4. Insert the session row with backend-neutral runtime fields.
 5. Register the session channel server in Claude's local MCP scope for that project.
 6. Spawn the detached worker.
-7. Worker launches Claude Code through the selected terminal backend.
-8. Worker launches Claude with the session root and any persisted `additionalDirs`.
-9. Worker auto-accepts trust, development channel, and Claude tool permission prompts if they appear, including the newer `Do you want to proceed?` approval dialog.
-10. If Claude asks for access outside the allowed directories, the worker dismisses that prompt and posts a Discord notice explaining how to add the path explicitly.
-11. If the worker does not reach ready, Conductor deletes the just-created session row and Discord channel, but keeps `data/sessions/<id>/` for diagnostics.
-12. Worker reports readiness through the daemon internal route.
-13. The daemon marks the session active and posts the ready notice.
+7. Select the agent backend using `DEFAULT_AGENT_BACKEND` and `ENABLED_AGENT_BACKENDS`.
+8. Worker launches the selected agent backend process through the chosen terminal backend.
+9. Worker launches Claude with the session root and any persisted `additionalDirs`.
+10. Worker auto-accepts trust, development channel, and Claude tool permission prompts if they appear, including the newer `Do you want to proceed?` approval dialog.
+11. If Claude asks for access outside the allowed directories, the worker dismisses that prompt and posts a Discord notice explaining how to add the path explicitly.
+12. If the worker does not reach ready, CC Conductor deletes the just-created session row and Discord channel, but keeps `data/sessions/<id>/` for diagnostics.
+13. Worker reports readiness through the daemon internal route.
+14. The daemon marks the session active and posts the ready notice.
 
 ## Active Behavior
 

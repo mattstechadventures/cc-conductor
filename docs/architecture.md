@@ -1,6 +1,6 @@
-# Architecture
+# CC Conductor Architecture
 
-Conductor has three runtime roles.
+CC Conductor has three runtime roles.
 
 ## Visual Overview
 
@@ -63,7 +63,7 @@ Each Claude session loads a generated Node MCP channel server through Claude Cod
 - declares `claude/channel`
 - is registered in Claude's local MCP scope for the session project before launch
 - is selected through Claude's development channel loader: `--dangerously-load-development-channels server:<session-server-name>`
-- launches through the Conductor repo's own resolved `tsx` loader path, not the session project's cwd
+- launches through the CC Conductor repo's own resolved `tsx` loader path, not the session project's cwd
 - long-polls the daemon for inbound Discord messages
 - emits `notifications/claude/channel` into the live Claude session
 - exposes `reply` and `react` tools that call back into the daemon
@@ -78,7 +78,7 @@ This is the source of truth for Claude replies in the supported path.
 - Outbound Claude reply:
   - only through the channel server `reply` / `react` tools
 
-Conductor no longer depends on pane scraping to mirror Claude replies.
+CC Conductor no longer depends on pane scraping to mirror Claude replies.
 
 ## Persistence Model
 

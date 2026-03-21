@@ -1,11 +1,11 @@
-# Conductor Docs
+# CC Conductor Docs
 
 ## Visual Overview
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
 flowchart TD
-    Docs[Conductor Docs] --> Runtime[Architecture and Bridge]
+    Docs[CC Conductor Docs] --> Runtime[Architecture and Bridge]
     Docs --> Lifecycle[Lifecycle and Recovery]
     Docs --> Ops[Setup Deployment Config]
     Docs --> Interfaces[Commands API Typing]
@@ -40,7 +40,7 @@ flowchart TD
 - [Bridge](./bridge.md): structured Discord transport and PTY fallback
 - [Session Lifecycle](./session-lifecycle.md): spawn, active, interruption, kill
 - [Resume & Recovery](./resume-and-recovery.md): reconnect, Claude resume, checkpoint fallback
-- [Configuration](./configuration.md): environment variables
+- [Configuration](./configuration.md): environment variables and backend selection
 - [Deployment](./deployment.md): service setup notes
 - [Checkpoints](./checkpoints.md): what gets persisted for recovery
 - [Health Monitoring](./health-monitoring.md): worker heartbeat and idle handling

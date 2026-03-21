@@ -1,4 +1,4 @@
-# Configuration
+# CC Conductor Configuration
 
 ## Visual Overview
 
@@ -12,6 +12,7 @@ flowchart LR
     UX[UX Settings] --> Startup
     Startup --> Daemon[Configured Daemon]
     Daemon --> Sessions[Session Behavior]
+    Daemon --> Agent[Agent Backends]
     Daemon --> Transport[Transport Behavior]
     Daemon --> Recovery[Recovery and Health]
 
@@ -20,7 +21,7 @@ flowchart LR
     classDef storage fill:#FFF7E6,stroke:#D97706,color:#7C2D12,stroke-width:1.5px;
 
     class Required,Runtime,Limits,Checkpoints,UX,Startup control;
-    class Daemon,Sessions,Transport,Recovery runtime;
+    class Daemon,Sessions,Agent,Transport,Recovery runtime;
 ```
 
 ## Required
@@ -29,7 +30,7 @@ flowchart LR
 |----------|-------------|
 | `DISCORD_BOT_TOKEN` | Discord bot token |
 | `DISCORD_CLIENT_ID` | Discord application client ID |
-| `DISCORD_GUILD_ID` | Discord guild ID Conductor manages |
+| `DISCORD_GUILD_ID` | Discord guild ID CC Conductor manages |
 
 ## Runtime
 
@@ -41,6 +42,14 @@ flowchart LR
 | `TERMINAL_BACKEND` | `pty` | `pty` is the supported backend, `tmux` is legacy only |
 | `STRUCTURED_TRANSPORT` | `channel` | `channel` enables the generated Claude channel server, `off` disables it |
 | `SESSION_RECONNECT_GRACE_MS` | `15000` | How long startup waits for live workers to reconnect before reconciliation |
+
+## Agent Backends
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEFAULT_AGENT_BACKEND` | `claude` | Default backend used when a session does not set its own backend |
+| `ENABLED_AGENT_BACKENDS` | `claude` | Comma-separated allowlist of backends exposed by the control plane |
+| `CODEX_BIN` | `codex` | Codex CLI executable path used when the Codex backend is enabled |
 
 ## Session Limits
 
@@ -70,6 +79,8 @@ flowchart LR
 
 - The supported path uses a generated Node MCP server with Claude’s development-channel flag.
 - `tmux` and Bun are optional only. They are not required for the supported runtime.
+- The new agent-backend settings are additive. They do not rename the existing `CONDUCTOR_*` env vars or the repository/package slug `cc-conductor`.
+- Configure `CODEX_BIN` before adding `codex` to `ENABLED_AGENT_BACKENDS`.
 - `COMMAND_PREFIX` must not contain whitespace. Invalid values fall back to `/`.
-- Conductor validates `CLAUDE_BIN` at startup and requires Claude Code `2.1.80+`.
+- CC Conductor validates `CLAUDE_BIN` at startup and requires Claude Code `2.1.80+`.
 - Legacy databases with `sessions.tmux_session NOT NULL` must be reset manually by deleting `data/conductor.db`, `data/conductor.db-shm`, and `data/conductor.db-wal`.

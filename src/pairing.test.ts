@@ -25,6 +25,8 @@ const baseSession: Session = {
   terminalHandle: null,
   transportKind: 'channel',
   transportState: 'disconnected',
+  activeBackend: 'claude',
+  backendStates: [],
   claudeSessionName: 'test2',
   claudeResumeRef: 'test2',
   workerStatus: 'starting',

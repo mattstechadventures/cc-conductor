@@ -1,8 +1,10 @@
-# Commands
+# CC Conductor Commands
 
 All commands are issued in the channel named by `ORCHESTRATOR_CHANNEL_NAME` (default `#orchestrator`).
 
 Set `COMMAND_PREFIX` to change the control-plane prefix. The examples below use `<prefix>` as a placeholder; with the default config, `<prefix>` is `/`.
+
+Session backend selection is controlled through `DEFAULT_AGENT_BACKEND` and `ENABLED_AGENT_BACKENDS`; those settings do not change the command names or the existing `CONDUCTOR_*` environment variables.
 
 ## Visual Overview
 
@@ -38,7 +40,7 @@ flowchart TD
 - Creates a Discord session channel
 - Creates a DB record
 - Spawns a detached session worker
-- Launches Claude Code with a stable session name
+- Launches the configured agent backend with a stable session name
 - Loads the generated Discord channel server when structured transport is enabled
 - If startup fails, the orchestrator reply includes a shortened diagnostic summary and the relevant worker log paths
 
@@ -59,8 +61,8 @@ Without a name, lists interrupted sessions.
 
 With a name, resume order is:
 
-1. Claude CLI resume using the stable Conductor session name
-2. Conductor checkpoint fallback with resume prompt injection
+1. Claude CLI resume using the stable CC Conductor session name
+2. CC Conductor checkpoint fallback with resume prompt injection
 
 ## `<prefix>add-dir`
 
@@ -68,7 +70,7 @@ With a name, resume order is:
 - In a session channel: `<prefix>add-dir <path>`
 - Persists an extra allowed directory for that session
 - Restarts the session so Claude relaunches with `--add-dir <path>`
-- If Claude later asks for a path outside the allowed set, Conductor posts an explicit notice instead of leaving the session hanging on the approval prompt
+- If Claude later asks for a path outside the allowed set, CC Conductor posts an explicit notice instead of leaving the session hanging on the approval prompt
 
 ## `<prefix>mode`
 

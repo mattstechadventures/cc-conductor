@@ -3,7 +3,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { nanoid } from 'nanoid';
 import { registerSessionChannelServer, unregisterSessionChannelServer } from './claude-mcp.js';
-import { getSessionInternalAuth, setSessionInternalAuth, updateSessionRuntime } from './sessions.js';
+import { getSessionBackend, getSessionInternalAuth, setSessionInternalAuth, updateSessionRuntime } from './sessions.js';
 import { waitForWorkerStatus } from './runtime-state.js';
 import {
   getRepoRoot,
@@ -30,12 +30,19 @@ export async function spawnSessionWorker(
   const workerToken = nanoid(32);
   const channelToken = nanoid(32);
   const daemonUrl = `http://127.0.0.1:${process.env.CONDUCTOR_API_PORT || '7842'}`;
-  const structuredTransport = process.env.STRUCTURED_TRANSPORT !== 'off';
+  const structuredTransport = session.activeBackend === 'claude' && process.env.STRUCTURED_TRANSPORT !== 'off';
   const workerStatePath = getWorkerStatePath(session.id);
   const stdoutLogPath = getWorkerStdoutLogPath(session.id);
   const stderrLogPath = getWorkerStderrLogPath(session.id);
   const terminalLogPath = getWorkerTerminalLogPath(session.id);
-  const terminalBackend = process.env.TERMINAL_BACKEND === 'tmux' ? 'tmux' : 'pty';
+  const terminalBackend = session.activeBackend === 'claude'
+    ? (process.env.TERMINAL_BACKEND === 'tmux' ? 'tmux' : 'pty')
+    : 'none';
+  const claudeBackend = getSessionBackend(session.id, 'claude');
+  const codexBackend = getSessionBackend(session.id, 'codex');
+  const workerEntry = session.activeBackend === 'claude'
+    ? `${getRepoRoot()}/src/worker.ts`
+    : `${getRepoRoot()}/src/codex-worker.ts`;
 
   setSessionInternalAuth(session.id, {
     workerToken,
@@ -45,11 +52,13 @@ export async function spawnSessionWorker(
   updateSessionRuntime(session.id, {
     workerId,
     terminalBackend,
-    terminalHandle: session.terminalHandle,
-    transportKind: structuredTransport ? 'channel' : 'pty_fallback',
+    terminalHandle: session.activeBackend === 'claude' ? session.terminalHandle : null,
+    transportKind: session.activeBackend === 'codex'
+      ? 'worker_http'
+      : (structuredTransport ? 'channel' : 'pty_fallback'),
     transportState: 'disconnected',
-    claudeSessionName: session.claudeSessionName,
-    claudeResumeRef: session.claudeResumeRef || session.claudeSessionName,
+    claudeSessionName: claudeBackend?.nativeSessionName || session.claudeSessionName,
+    claudeResumeRef: claudeBackend?.nativeResumeRef || session.claudeResumeRef || session.claudeSessionName,
     workerStatus: 'starting',
     pid: null,
   });
@@ -60,6 +69,7 @@ export async function spawnSessionWorker(
     port: null,
     pid: null,
     claudePid: null,
+    activeBackend: session.activeBackend,
     terminalBackend,
     terminalHandle: null,
     workerStatus: 'starting',
@@ -87,6 +97,7 @@ export async function spawnSessionWorker(
       writeLaunchFailureState({
         sessionId: session.id,
         workerId,
+        activeBackend: session.activeBackend,
         workerStatePath,
         stdoutLogPath,
         stderrLogPath,
@@ -106,7 +117,7 @@ export async function spawnSessionWorker(
     stderrFd = fs.openSync(stderrLogPath, 'a');
     child = spawn(
       process.execPath,
-      ['--import', 'tsx', `${getRepoRoot()}/src/worker.ts`],
+      ['--import', 'tsx', workerEntry],
       {
         cwd: getRepoRoot(),
         detached: true,
@@ -129,8 +140,11 @@ export async function spawnSessionWorker(
           CONDUCTOR_SESSION_NAME: session.name,
           CONDUCTOR_PROJECT_DIR: session.projectDir,
           CONDUCTOR_ADDITIONAL_DIRS_JSON: JSON.stringify(session.additionalDirs),
-          CONDUCTOR_CLAUDE_SESSION_NAME: session.claudeSessionName,
-          CONDUCTOR_CLAUDE_RESUME_REF: session.claudeResumeRef || session.claudeSessionName,
+          CONDUCTOR_ACTIVE_BACKEND: session.activeBackend,
+          CONDUCTOR_CLAUDE_SESSION_NAME: claudeBackend?.nativeSessionName || session.claudeSessionName,
+          CONDUCTOR_CLAUDE_RESUME_REF: claudeBackend?.nativeResumeRef || session.claudeResumeRef || session.claudeSessionName,
+          CONDUCTOR_CODEX_SESSION_NAME: codexBackend?.nativeSessionName || session.name,
+          CONDUCTOR_CODEX_RESUME_REF: codexBackend?.nativeResumeRef || '',
           CONDUCTOR_TERMINAL_BACKEND: terminalBackend,
         },
       }
@@ -139,6 +153,7 @@ export async function spawnSessionWorker(
     writeLaunchFailureState({
       sessionId: session.id,
       workerId,
+      activeBackend: session.activeBackend,
       workerStatePath,
       stdoutLogPath,
       stderrLogPath,
@@ -250,6 +265,7 @@ function clearStaleWorkerRuntime(sessionId: string): void {
 function writeLaunchFailureState(input: {
   sessionId: string;
   workerId: string;
+  activeBackend: Session['activeBackend'];
   workerStatePath: string;
   stdoutLogPath: string;
   stderrLogPath: string;
@@ -263,6 +279,7 @@ function writeLaunchFailureState(input: {
     port: null,
     pid: null,
     claudePid: null,
+    activeBackend: input.activeBackend,
     terminalBackend: input.terminalBackend,
     terminalHandle: null,
     workerStatus: 'exited',

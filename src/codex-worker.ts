@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { extractCodexThreadId } from './codex-cli.js';
+import { extractCodexThreadId, shouldUseShellForExecutable } from './codex-cli.js';
 import { logger } from './logger.js';
 import { writeJsonFile } from './state.js';
 import type {
@@ -25,6 +25,7 @@ const additionalDirs = parseAdditionalDirs(process.env.CONDUCTOR_ADDITIONAL_DIRS
 const stdoutLogPath = process.env.CONDUCTOR_WORKER_STDOUT_LOG_PATH || path.join(workerStateDir, 'worker.stdout.log');
 const stderrLogPath = process.env.CONDUCTOR_WORKER_STDERR_LOG_PATH || path.join(workerStateDir, 'worker.stderr.log');
 const terminalLogPath = process.env.CONDUCTOR_TERMINAL_LOG_PATH || path.join(workerStateDir, 'terminal.log');
+const runtimeBuildId = requiredEnv('CONDUCTOR_RUNTIME_BUILD_ID');
 const codexSessionName = process.env.CONDUCTOR_CODEX_SESSION_NAME || sessionName;
 const codexBin = process.env.CONDUCTOR_RESOLVED_CODEX_BIN || process.env.CODEX_BIN || 'codex';
 const activeBackend = (process.env.CONDUCTOR_ACTIVE_BACKEND as AgentBackend | undefined) || 'codex';
@@ -135,10 +136,12 @@ async function main(): Promise<void> {
     });
   });
 
+  writeStateFile();
+  await registerWithDaemon();
   workerStatus = 'ready';
   ready = true;
   writeStateFile();
-  await registerWithDaemon();
+  await heartbeat();
   startHeartbeat();
 
   process.on('SIGTERM', () => {
@@ -162,6 +165,7 @@ async function runCodexTurn(message: string): Promise<TurnResult> {
     const child = spawn(codexBin, args, {
       cwd: projectDir,
       env: process.env,
+      shell: shouldUseShellForExecutable(codexBin),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -187,6 +191,7 @@ async function runCodexTurn(message: string): Promise<TurnResult> {
       settled = true;
       const messageText = `Codex turn failed to start: ${err.message}`;
       lastError = messageText;
+      logger.error(`Codex worker ${workerId} turn failed to start: ${err.message}`);
       activeChild = null;
       writeStateFile();
       await heartbeat();
@@ -209,6 +214,7 @@ async function runCodexTurn(message: string): Promise<TurnResult> {
       const finalMessage = readOptionalText(outputLastMessagePath)?.trim();
       const success = exitCode === 0;
       if (success && finalMessage) {
+        logger.info(`Codex worker ${workerId} turn completed successfully`);
         await postWorkerNotice(finalMessage);
         await heartbeat();
         resolve({ ok: true });
@@ -218,6 +224,7 @@ async function runCodexTurn(message: string): Promise<TurnResult> {
       if (success) {
         const messageText = 'Codex turn completed without a final message.';
         lastError = messageText;
+        logger.warn(`Codex worker ${workerId} completed without a final message`);
         await postWorkerNotice(messageText);
         await heartbeat();
         resolve({ ok: false, error: messageText });
@@ -225,6 +232,7 @@ async function runCodexTurn(message: string): Promise<TurnResult> {
       } else if (!success) {
         const errorText = buildFailureMessage(exitCode, stderr, stdout);
         lastError = errorText;
+        logger.warn(`Codex worker ${workerId} turn failed: ${errorText}`);
         await postWorkerNotice(errorText);
       }
 
@@ -259,6 +267,7 @@ function buildCodexArgs(outputLastMessagePath: string): string[] {
 async function registerWithDaemon(): Promise<void> {
   const registration: WorkerRegistration = {
     workerId,
+    runtimeBuildId,
     port: serverPort,
     pid: process.pid,
     claudePid: getActiveChildPid(),
@@ -287,6 +296,7 @@ function startHeartbeat(): void {
 async function heartbeat(): Promise<void> {
   const payload: WorkerHeartbeat = {
     workerId,
+    runtimeBuildId,
     port: serverPort,
     pid: process.pid,
     claudePid: getActiveChildPid(),
@@ -340,6 +350,7 @@ function writeStateFile(): void {
   const state: WorkerStateFile = {
     sessionId,
     workerId,
+    runtimeBuildId,
     port: serverPort || null,
     pid: process.pid,
     claudePid: getActiveChildPid(),

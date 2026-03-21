@@ -75,6 +75,11 @@ export function getWorkerRuntime(sessionId: string): WorkerRuntime | null {
   return getOrCreateRuntime(sessionId).worker;
 }
 
+export function clearWorkerRuntime(sessionId: string): void {
+  const state = getOrCreateRuntime(sessionId);
+  state.worker = null;
+}
+
 export function markChannelConnected(sessionId: string): void {
   const state = getOrCreateRuntime(sessionId);
   state.channel = {

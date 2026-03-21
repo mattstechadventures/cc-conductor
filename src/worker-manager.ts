@@ -4,7 +4,8 @@ import { spawn } from 'child_process';
 import { nanoid } from 'nanoid';
 import { registerSessionChannelServer, unregisterSessionChannelServer } from './claude-mcp.js';
 import { getSessionBackend, getSessionInternalAuth, setSessionInternalAuth, updateSessionRuntime } from './sessions.js';
-import { waitForWorkerStatus } from './runtime-state.js';
+import { clearWorkerRuntime, waitForWorkerStatus } from './runtime-state.js';
+import { getRuntimeBuildId } from './runtime-build.js';
 import {
   getRepoRoot,
   getWorkerStatePath,
@@ -14,10 +15,17 @@ import {
   writeJsonFile,
 } from './state.js';
 import { logger } from './logger.js';
+import { readWorkerControlState, requestWorkerTerminate, terminateWorkerProcess } from './worker-control.js';
 import type { Session, WorkerLaunchMode, WorkerStartResult, WorkerStateFile } from './types.js';
 import { buildWorkerStartupFailure } from './worker-diagnostics.js';
 
 const WORKER_READY_TIMEOUT_MS = 30_000;
+const runtimeBuildId = process.env.CONDUCTOR_RUNTIME_BUILD_ID || getRuntimeBuildId();
+
+export interface WorkerInputResult {
+  ok: boolean;
+  error?: string;
+}
 
 export async function spawnSessionWorker(
   session: Session,
@@ -66,6 +74,7 @@ export async function spawnSessionWorker(
   writeJsonFile(workerStatePath, {
     sessionId: session.id,
     workerId,
+    runtimeBuildId,
     port: null,
     pid: null,
     claudePid: null,
@@ -146,6 +155,7 @@ export async function spawnSessionWorker(
           CONDUCTOR_CODEX_SESSION_NAME: codexBackend?.nativeSessionName || session.name,
           CONDUCTOR_CODEX_RESUME_REF: codexBackend?.nativeResumeRef || '',
           CONDUCTOR_TERMINAL_BACKEND: terminalBackend,
+          CONDUCTOR_RUNTIME_BUILD_ID: runtimeBuildId,
         },
       }
     );
@@ -187,13 +197,15 @@ export async function spawnSessionWorker(
   );
 }
 
-export async function sendInputToWorker(session: Session, message: string): Promise<boolean> {
+export async function sendInputToWorker(session: Session, message: string): Promise<WorkerInputResult> {
   const auth = getSessionInternalAuth(session.id);
-  const port = await readWorkerPort(session.id);
-  if (!auth?.workerToken || !port) return false;
+  const controlState = readWorkerControlState(session.id);
+  if (!auth?.workerToken || !controlState.port) {
+    return { ok: false, error: 'No worker transport is available.' };
+  }
 
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/input`, {
+    const res = await fetch(`http://127.0.0.1:${controlState.port}/input`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${auth.workerToken}`,
@@ -201,50 +213,62 @@ export async function sendInputToWorker(session: Session, message: string): Prom
       },
       body: JSON.stringify({ message }),
     });
-    return res.ok;
-  } catch {
-    return false;
+    if (res.ok) {
+      return { ok: true };
+    }
+
+    let payload: { error?: string } | null = null;
+    try {
+      payload = await res.json() as { error?: string };
+    } catch {
+      payload = null;
+    }
+
+    return {
+      ok: false,
+      error: buildWorkerInputFailure(res.status, payload),
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: `Worker input request failed: ${err.message}`,
+    };
   }
+}
+
+export function buildWorkerInputFailure(
+  statusCode: number,
+  payload?: { error?: string } | null
+): string {
+  if (payload?.error) {
+    return payload.error;
+  }
+  return `Worker input request failed with HTTP ${statusCode}.`;
 }
 
 export async function terminateSessionWorker(session: Session): Promise<void> {
   const auth = getSessionInternalAuth(session.id);
-  const port = await readWorkerPort(session.id);
-  if (!auth?.workerToken || !port) {
-    clearStaleWorkerRuntime(session.id);
-    cleanupRegisteredChannelServer(session, session.transportKind === 'channel');
-    return;
-  }
+  const controlState = readWorkerControlState(session.id);
+  let terminateError: string | null = null;
 
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/control/terminate`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${auth.workerToken}`,
-      },
-    });
-    if (!res.ok) {
-      clearStaleWorkerRuntime(session.id);
-      logger.warn(`Failed to terminate worker for ${session.name}: HTTP ${res.status}`);
+  if (auth?.workerToken && controlState.port) {
+    const result = await requestWorkerTerminate(controlState.port, auth.workerToken);
+    if (!result.ok) {
+      terminateError = result.error || 'unknown error';
     }
-  } catch (err: any) {
-    clearStaleWorkerRuntime(session.id);
-    logger.warn(`Failed to terminate worker for ${session.name}: ${err.message}`);
   }
 
+  if (terminateError || !auth?.workerToken || !controlState.port) {
+    const pidResult = terminateWorkerProcess(controlState.pid);
+    if (!pidResult.ok && terminateError) {
+      logger.warn(`Failed to terminate worker for ${session.name}: ${terminateError}`);
+    } else if (!pidResult.ok && !terminateError && controlState.pid) {
+      logger.warn(`Failed to terminate worker for ${session.name}: ${pidResult.error}`);
+    }
+  }
+
+  clearStaleWorkerRuntime(session.id);
   cleanupRegisteredChannelServer(session, session.transportKind === 'channel');
-}
-
-async function readWorkerPort(sessionId: string): Promise<number | null> {
-  const workerStatePath = getWorkerStatePath(sessionId);
-  try {
-    const raw = JSON.parse(await (await import('fs/promises')).readFile(workerStatePath, 'utf-8')) as {
-      port?: number;
-    };
-    return typeof raw.port === 'number' ? raw.port : null;
-  } catch {
-    return null;
-  }
 }
 
 function appendLaunchMarker(logPath: string, workerId: string, mode: WorkerLaunchMode): void {
@@ -253,6 +277,7 @@ function appendLaunchMarker(logPath: string, workerId: string, mode: WorkerLaunc
 }
 
 function clearStaleWorkerRuntime(sessionId: string): void {
+  clearWorkerRuntime(sessionId);
   updateSessionRuntime(sessionId, {
     workerId: null,
     terminalHandle: null,
@@ -276,6 +301,7 @@ function writeLaunchFailureState(input: {
   const state: WorkerStateFile = {
     sessionId: input.sessionId,
     workerId: input.workerId,
+    runtimeBuildId,
     port: null,
     pid: null,
     claudePid: null,

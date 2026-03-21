@@ -34,6 +34,9 @@ The main daemon owns:
 - the localhost REST API
 - SQLite persistence
 - startup compatibility checks for the DB schema and Claude Code version
+- worker heartbeat-driven readiness transitions
+- runtime build-id checks for worker compatibility
+- best-effort stale-worker shutdown through worker HTTP control with local PID fallback
 - session reconciliation
 - health monitoring
 - checkpoint scheduling
@@ -49,12 +52,14 @@ Each session runs in a detached worker process. The worker owns:
 - the terminal backend, with `node-pty` as the supported default
 - startup readiness detection
 - the session root plus any persisted `additionalDirs`
-- trust, development-channel, and Claude tool approval auto-accept flows
+- trust, development-channel, and known-safe Claude approval auto-accept flows
+- an unknown-modal watchdog that interrupts stalled sessions instead of letting them hang forever
 - outside-directory prompt rejection and user-visible blocked-path notices
 - session-local worker and terminal diagnostics under `data/sessions/<sessionId>/`
 - local worker control endpoints for fallback input and shutdown
 
-Workers survive daemon restarts and reconnect to the daemon over localhost.
+Workers survive daemon restarts and reconnect to the daemon over localhost, but reconnecting workers whose runtime build id does not match the daemon are interrupted and must be resumed on fresh code.
+If a stale or unreachable worker no longer accepts authenticated control requests, CC Conductor falls back to terminating the local worker PID directly.
 
 ## 3. Channel Server
 

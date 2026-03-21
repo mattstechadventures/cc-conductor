@@ -99,6 +99,18 @@ export function extractCodexThreadId(output: string): string | null {
   return typeof started?.thread_id === 'string' && started.thread_id ? started.thread_id : null;
 }
 
+export function shouldUseShellForExecutable(
+  executable: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (platform !== 'win32') {
+    return false;
+  }
+
+  const ext = path.extname(executable).toLowerCase();
+  return ext === '.cmd' || ext === '.bat';
+}
+
 function runHelpCommand(
   executable: string,
   args: string[],
@@ -108,6 +120,8 @@ function runHelpCommand(
   const result = spawnSync(executable, args, {
     env,
     encoding: 'utf-8',
+    shell: shouldUseShellForExecutable(executable),
+    windowsHide: true,
   });
 
   if (result.error) {
@@ -152,8 +166,8 @@ function buildExecutableCandidates(
   const rawPathExt = env.PATHEXT || '.COM;.EXE;.BAT;.CMD';
   const extensions = rawPathExt.split(';').filter(Boolean);
   return [
-    input,
     ...extensions.map(extension => `${input}${extension.toLowerCase()}`),
     ...extensions.map(extension => `${input}${extension.toUpperCase()}`),
+    input,
   ];
 }

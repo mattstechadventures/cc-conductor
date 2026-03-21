@@ -103,3 +103,24 @@ export function formatBackendStatus(summary: SessionBackendSummary | null): stri
   if (summary.state === 'active') return 'active';
   return summary.resumable ? 'parked and resumable' : 'parked';
 }
+
+export function formatInactiveBackendSummary(
+  session: Pick<Session, 'activeBackend' | 'backendStates'>
+): string {
+  const inactive = getSessionBackendSummary(session, getInactiveBackend(session));
+  if (!inactive) {
+    return 'Standby backend: n/a';
+  }
+
+  const backendName = `**${getBackendDisplayName(inactive.backend)}**`;
+  if (inactive.state === 'never_started') {
+    return `Standby backend: ${backendName} has not been started yet`;
+  }
+  if (inactive.state === 'active') {
+    return `Standby backend: ${backendName} is active`;
+  }
+  if (inactive.resumable) {
+    return `Standby backend: ${backendName} is parked and can be resumed later`;
+  }
+  return `Standby backend: ${backendName} is parked`;
+}

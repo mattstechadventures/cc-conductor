@@ -5,7 +5,8 @@ import { readCheckpoint } from './checkpoint.js';
 import { startBridge } from './bridge.js';
 import { buildBackendHandoffPrompt, buildResumePrompt, fetchRecentSessionMessages, mergeCheckpointMessages } from './handoff.js';
 import { logger } from './logger.js';
-import { getWorkerRuntime } from './runtime-state.js';
+import { getRuntimeBuildId } from './runtime-build.js';
+import { clearWorkerRuntime, getWorkerRuntime } from './runtime-state.js';
 import {
   deleteSession,
   getAllSessions,
@@ -21,6 +22,7 @@ import {
   updateSessionStatus,
 } from './sessions.js';
 import { getResumePromptPath } from './state.js';
+import { hasCompatibleWorkerRuntime } from './worker-runtime-compat.js';
 import { sendInputToWorker, spawnSessionWorker, terminateSessionWorker } from './worker-manager.js';
 import { formatCommand } from './command-prefix.js';
 import type {
@@ -144,6 +146,7 @@ export async function switchSessionBackend(
 }
 
 export async function reconcileOnStartup(discordClient: Client): Promise<ReconciliationReport> {
+  const runtimeBuildId = process.env.CONDUCTOR_RUNTIME_BUILD_ID || getRuntimeBuildId();
   const sessions = getAllSessions();
   const report: ReconciliationReport = {
     liveAndHealthy: [],
@@ -168,7 +171,7 @@ export async function reconcileOnStartup(discordClient: Client): Promise<Reconci
     }
 
     const worker = getWorkerRuntime(session.id);
-    if (worker) {
+    if (worker && hasCompatibleWorkerRuntime(runtimeBuildId, worker)) {
       if (session.status === 'active' || session.status === 'starting' || session.status === 'idle') {
         report.liveAndHealthy.push(session.name);
       } else {
@@ -176,6 +179,17 @@ export async function reconcileOnStartup(discordClient: Client): Promise<Reconci
       }
       await reattachSession(session, discordClient);
       continue;
+    }
+
+    if (worker && !hasCompatibleWorkerRuntime(runtimeBuildId, worker)) {
+      clearWorkerRuntime(session.id);
+      updateSessionRuntime(session.id, {
+        workerId: null,
+        terminalHandle: null,
+        transportState: 'disconnected',
+        workerStatus: 'stopped',
+        pid: null,
+      });
     }
 
     if (session.status !== 'dead' && session.status !== 'interrupted') {
@@ -346,10 +360,10 @@ async function startCodexForSwitch(session: Session, handoffPrompt: string): Pro
     throw new Error(start.error || 'Failed to start Codex backend');
   }
 
-  const handoffAccepted = await sendInputToWorker(getSession(session.id) || session, handoffPrompt);
-  if (!handoffAccepted) {
+  const handoffResult = await sendInputToWorker(getSession(session.id) || session, handoffPrompt);
+  if (!handoffResult.ok) {
     await terminateSessionWorker(session);
-    throw new Error('Codex handoff turn failed');
+    throw new Error(`Codex handoff turn failed: ${handoffResult.error || 'unknown error'}`);
   }
 }
 

@@ -132,6 +132,7 @@ export interface SessionInternalAuth {
 
 export interface WorkerRegistration {
   workerId: string;
+  runtimeBuildId: string;
   port: number;
   pid: number;
   claudePid: number | null;
@@ -144,6 +145,7 @@ export interface WorkerRegistration {
 export interface WorkerStateFile {
   sessionId: string;
   workerId: string;
+  runtimeBuildId: string;
   port: number | null;
   pid: number | null;
   claudePid: number | null;
@@ -170,6 +172,7 @@ export interface WorkerStartResult {
 
 export interface WorkerHeartbeat {
   workerId: string;
+  runtimeBuildId: string;
   port: number;
   pid: number;
   claudePid: number | null;

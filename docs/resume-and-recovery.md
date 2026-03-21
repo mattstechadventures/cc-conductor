@@ -31,13 +31,17 @@ flowchart TD
 
 - The daemon starts its internal routes.
 - Existing workers reconnect during the reconnect grace window.
-- Reconciliation treats those sessions as live and reattaches them.
+- Reconciliation reattaches only workers whose runtime build id matches the daemon.
+- Workers from an older CC Conductor runtime build are interrupted immediately and must be resumed on a fresh worker.
+- If the stale worker no longer accepts authenticated shutdown, the daemon falls back to terminating the local worker PID.
 
 No session context is lost in this case.
 
 ## Case 2: Worker Or Claude Exit
 
 - Health monitoring or worker heartbeat marks the session interrupted.
+- The worker also interrupts the session if Claude is stuck on an unknown blocking modal for 30 seconds.
+- The daemon also interrupts the session if the reconnecting worker is running stale CC Conductor code.
 - `<prefix>resume <name>` starts a new worker.
 
 Resume order:

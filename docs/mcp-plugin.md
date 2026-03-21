@@ -32,6 +32,9 @@ flowchart LR
 - Claude development channel selector: `--dangerously-load-development-channels server:<session-server-name>`
 - daemon-owned Discord bot client
 - localhost bearer-authenticated callbacks between the daemon and the channel server
+- worker-driven startup gating, known-safe approval auto-clear, and unknown-modal interruption
+- daemon-side stale-worker rejection when a reconnecting runtime build id does not match the current daemon
+- best-effort worker shutdown that falls back to the local worker PID when stale worker control auth no longer matches
 - worker and terminal diagnostics under `data/sessions/<sessionId>/`
 
 ## Legacy Plugin Path

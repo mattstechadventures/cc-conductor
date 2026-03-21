@@ -46,13 +46,15 @@ flowchart TD
 
 ## `<prefix>list`
 
-Shows current sessions, status, project dir, age, and last activity.
+Shows current sessions, status, active backend, standby backend state, project dir, age, and last activity.
 
 ## `<prefix>kill <name>`
 
 - Stops the session worker
 - Clears daemon-side transport state
 - Archives or deletes the Discord channel depending on `ARCHIVE_ON_KILL`
+- When archiving is enabled, the archived channel is moved into the `Archive` category
+- If the bot lacks permission to archive or delete the channel, session shutdown still completes and channel cleanup becomes best effort
 - Deletes the session record
 
 ## `<prefix>resume [name]`

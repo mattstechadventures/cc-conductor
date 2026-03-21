@@ -4,11 +4,9 @@ import {
   ComponentType,
 } from 'discord.js';
 import {
-  formatBackendStatus,
+  formatInactiveBackendSummary,
   getBackendDisplayName,
   getDefaultAgentBackend,
-  getInactiveBackend,
-  getSessionBackendSummary,
   isAgentBackend,
 } from './agent-backends.js';
 import type { AddDirResult, Session, DaemonResponse, ResumeResult, SwitchBackendResult } from './types.js';
@@ -608,12 +606,7 @@ function parseNewCommandArgs(args: string[]): { name: string; dir?: string; back
 }
 
 function formatInactiveBackendLine(session: Session): string {
-  const inactive = getSessionBackendSummary(session, getInactiveBackend(session));
-  if (!inactive) {
-    return 'Inactive backend: n/a';
-  }
-
-  return `Inactive backend: **${getBackendDisplayName(inactive.backend)}** is ${formatBackendStatus(inactive)}`;
+  return formatInactiveBackendSummary(session);
 }
 
 function truncateDiscordMessage(content: string): string {

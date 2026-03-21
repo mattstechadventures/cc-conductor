@@ -6,6 +6,7 @@ import { stopAllBridges } from './bridge.js';
 import { flushAllCheckpoints, startCheckpointScheduler, stopCheckpointScheduler } from './checkpoint.js';
 import { createDaemon, startHealthMonitor, stopHealthMonitor } from './daemon.js';
 import { logger } from './logger.js';
+import { getRuntimeBuildId } from './runtime-build.js';
 import { reconcileOnStartup } from './resume.js';
 import { closeDb, getActiveSessions, getSessionByName, initDb } from './sessions.js';
 import { waitForWorkerRegistrations } from './runtime-state.js';
@@ -21,6 +22,7 @@ for (const variable of REQUIRED_VARS) {
 
 async function main(): Promise<void> {
   logger.info('CC Conductor starting...');
+  process.env.CONDUCTOR_RUNTIME_BUILD_ID = getRuntimeBuildId();
   initDb();
   for (const backend of parseEnabledAgentBackends()) {
     const validation = getBackendAdapter(backend).validate(process.env) as {

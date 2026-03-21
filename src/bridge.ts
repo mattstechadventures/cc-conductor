@@ -101,8 +101,8 @@ export async function sendToSession(
       return false;
     }
 
-    const sentViaWorker = await sendInputToWorker(session, message);
-    if (sentViaWorker) {
+    const workerResult = await sendInputToWorker(session, message);
+    if (workerResult.ok) {
       updateSessionRuntime(session.id, {
         transportKind: 'worker_http',
         transportState: 'connected',
@@ -117,7 +117,7 @@ export async function sendToSession(
       transportKind: 'worker_http',
       transportState: 'disconnected',
     });
-    logger.warn(`No worker transport available for ${session.name}`);
+    logger.warn(`Worker-backed Codex turn failed for ${session.name}: ${workerResult.error || 'unknown error'}`);
     return false;
   }
 
@@ -138,8 +138,8 @@ export async function sendToSession(
     return true;
   }
 
-  const sentViaWorker = await sendInputToWorker(session, message);
-  if (sentViaWorker) {
+  const workerResult = await sendInputToWorker(session, message);
+  if (workerResult.ok) {
     updateSessionRuntime(session.id, {
       transportKind: 'pty_fallback',
       transportState: 'degraded',
@@ -153,7 +153,7 @@ export async function sendToSession(
     endSessionTurn(session.id);
   }
   stopTypingIndicator(session.id);
-  logger.warn(`No transport available for ${session.name}`);
+  logger.warn(`No transport available for ${session.name}${workerResult.error ? `: ${workerResult.error}` : ''}`);
   return false;
 }
 

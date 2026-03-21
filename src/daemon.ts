@@ -4,14 +4,24 @@ import os from 'os';
 import path from 'path';
 import { ChannelType, Client, TextChannel } from 'discord.js';
 import { nanoid } from 'nanoid';
+import { buildArchivedChannelName, findArchiveCategory } from './channel-archive.js';
 import {
-  formatBackendStatus,
+  formatInactiveBackendSummary,
   getBackendDisplayName,
   getDefaultAgentBackend,
   getSessionBackendSummary,
   isAgentBackend,
   isBackendEnabled,
 } from './agent-backends.js';
+import { getRuntimeBuildId } from './runtime-build.js';
+import { getReadyHeartbeatTransition } from './worker-heartbeat.js';
+import { getWorkerBuildCompatibilityIssue } from './worker-runtime-compat.js';
+import {
+  formatRuntimeBuildIdForLog,
+  isDiscordMissingPermissionsError,
+  requestWorkerTerminate,
+  terminateWorkerProcess,
+} from './worker-control.js';
 import {
   disconnectChannel,
   handleChannelReaction,
@@ -58,12 +68,13 @@ import type {
   WorkerHeartbeat,
   WorkerRegistration,
 } from './types.js';
-import { endSessionTurn, getWorkerRuntime, isSessionTurnLocked } from './runtime-state.js';
+import { clearWorkerRuntime, endSessionTurn, getWorkerRuntime, isSessionTurnLocked } from './runtime-state.js';
 import { spawnSessionWorker, terminateSessionWorker } from './worker-manager.js';
 import { formatCommand } from './command-prefix.js';
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
 const WORKER_STALE_MS = 20_000;
+const runtimeBuildId = process.env.CONDUCTOR_RUNTIME_BUILD_ID || getRuntimeBuildId();
 
 let healthMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -380,6 +391,13 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
 
     const payload = req.body as WorkerRegistration;
+    const compatibilityIssue = getWorkerBuildCompatibilityIssue(runtimeBuildId, payload);
+    if (compatibilityIssue) {
+      void interruptStaleWorkerSession(session.id, payload, compatibilityIssue, discordClient);
+      res.status(409).json({ ok: false, error: 'Worker is running stale CC Conductor code' });
+      return;
+    }
+
     registerWorker(session.id, payload);
     updateSessionRuntime(session.id, {
       workerId: payload.workerId,
@@ -399,6 +417,13 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
 
     const payload = req.body as WorkerHeartbeat;
+    const compatibilityIssue = getWorkerBuildCompatibilityIssue(runtimeBuildId, payload);
+    if (compatibilityIssue) {
+      void interruptStaleWorkerSession(session.id, payload, compatibilityIssue, discordClient);
+      res.status(409).json({ ok: false, error: 'Worker is running stale CC Conductor code' });
+      return;
+    }
+
     updateWorkerHeartbeat(session.id, payload);
     updateSessionRuntime(session.id, {
       workerId: payload.workerId,
@@ -410,30 +435,20 @@ export function createDaemon(deps: DaemonDeps): express.Express {
 
     if (payload.workerStatus === 'ready') {
       const latest = getSession(session.id);
-      if (latest && latest.status === 'starting') {
-        if (latest.activeBackend === payload.activeBackend) {
+      const transition = latest ? getReadyHeartbeatTransition(latest, payload) : null;
+      if (latest && transition) {
+        if (transition.shouldMarkBackendActive) {
           markBackendActive(session.id, latest.activeBackend);
         }
-        if (payload.activeBackend === 'codex') {
-          updateSessionRuntime(session.id, {
-            transportKind: 'worker_http',
-            transportState: 'connected',
-          });
+        if (Object.keys(transition.runtimePatch).length > 0) {
+          updateSessionRuntime(session.id, transition.runtimePatch);
         }
         updateSessionStatus(session.id, 'active', payload.claudePid);
-        await postSessionReadyNotice(session.id, discordClient);
-      } else if (latest && latest.status === 'interrupted') {
-        if (latest.activeBackend === payload.activeBackend) {
-          markBackendActive(session.id, latest.activeBackend);
+        if (transition.notice === 'ready') {
+          await postSessionReadyNotice(session.id, discordClient);
+        } else {
+          await postReconnectedNotice(session.id, discordClient);
         }
-        if (payload.activeBackend === 'codex') {
-          updateSessionRuntime(session.id, {
-            transportKind: 'worker_http',
-            transportState: 'connected',
-          });
-        }
-        updateSessionStatus(session.id, 'active', payload.claudePid);
-        await postReconnectedNotice(session.id, discordClient);
       }
     } else if (payload.workerStatus === 'exited') {
       const latest = getSession(session.id);
@@ -575,8 +590,23 @@ export function startHealthMonitor(discordClient: Client): void {
       }
 
       const worker = getWorkerRuntime(session.id);
-      if (!worker || Date.now() - worker.lastHeartbeatAt > WORKER_STALE_MS) {
-        logger.warn(`Session ${session.name}: worker stale or missing`);
+      const compatibilityIssue = worker ? getWorkerBuildCompatibilityIssue(runtimeBuildId, worker) : null;
+      if (!worker || compatibilityIssue || Date.now() - worker.lastHeartbeatAt > WORKER_STALE_MS) {
+        if (worker && compatibilityIssue) {
+          logger.warn(
+            `Session ${session.name}: worker runtime build mismatch; daemon=${formatRuntimeBuildIdForLog(runtimeBuildId)} worker=${formatRuntimeBuildIdForLog(worker.runtimeBuildId)}`
+          );
+          clearWorkerRuntime(session.id);
+          updateSessionRuntime(session.id, {
+            workerId: null,
+            terminalHandle: null,
+            transportState: 'disconnected',
+            workerStatus: 'stopped',
+            pid: null,
+          });
+        } else {
+          logger.warn(`Session ${session.name}: worker stale or missing`);
+        }
         endSessionTurn(session.id);
         markInterrupted(session.id);
         await postInterruptedNotice(session.id, discordClient);
@@ -620,17 +650,18 @@ async function handleSessionChannelDeletion(session: Session, discordClient: Cli
   const archiveOnKill = process.env.ARCHIVE_ON_KILL !== 'false';
   try {
     const guild = discordClient.guilds.cache.get(process.env.DISCORD_GUILD_ID!);
-    const channel = guild?.channels.cache.get(session.discordChannelId);
+    const channel = guild
+      ? await guild.channels.fetch(session.discordChannelId).catch(() => null)
+      : null;
     if (!channel) return;
 
     if (archiveOnKill) {
       const textChannel = channel as TextChannel;
-      await textChannel.setName(`archive-${session.name}`);
+      await textChannel.setName(buildArchivedChannelName(session.name));
       await textChannel.send(`⚠ Session **${session.name}** has been killed and archived.`);
 
-      let archiveCategory = guild?.channels.cache.find(
-        entry => entry.name === 'Archive' && entry.type === ChannelType.GuildCategory
-      );
+      const guildChannels = guild ? await guild.channels.fetch() : null;
+      let archiveCategory = guildChannels ? findArchiveCategory(guildChannels.values()) : null;
       if (!archiveCategory && guild) {
         archiveCategory = await guild.channels.create({
           name: 'Archive',
@@ -638,13 +669,17 @@ async function handleSessionChannelDeletion(session: Session, discordClient: Cli
         });
       }
       if (archiveCategory) {
-        await textChannel.setParent(archiveCategory.id);
+        await textChannel.setParent(archiveCategory.id, { lockPermissions: false });
       }
       return;
     }
 
     await channel.delete();
   } catch (err: any) {
+    if (isDiscordMissingPermissionsError(err)) {
+      logger.warn(`Discord channel cleanup skipped for ${session.name}: missing permissions`);
+      return;
+    }
     logger.error(`Failed to handle Discord channel for ${session.name}: ${err.message}`);
   }
 }
@@ -674,10 +709,9 @@ async function postSessionReadyNotice(sessionId: string, discordClient: Client):
   try {
     const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
     if (channel) {
-      const inactive = session.backendStates.find(summary => summary.backend !== session.activeBackend) || null;
       await channel.send(
         `✓ Session **${session.name}** is live on **${getBackendDisplayName(session.activeBackend)}** in \`${session.projectDir}\`.` +
-        (inactive ? ` Inactive backend: **${getBackendDisplayName(inactive.backend)}** is ${formatBackendStatus(inactive)}.` : '')
+        ` ${formatInactiveBackendSummary(session)}.`
       );
     }
   } catch {
@@ -708,10 +742,74 @@ async function postReconnectedNotice(sessionId: string, discordClient: Client): 
   try {
     const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
     if (channel) {
-      const inactive = session.backendStates.find(summary => summary.backend !== session.activeBackend) || null;
       await channel.send(
         `↺ Session **${session.name}** reconnected on **${getBackendDisplayName(session.activeBackend)}**.` +
-        (inactive ? ` Inactive backend: **${getBackendDisplayName(inactive.backend)}** is ${formatBackendStatus(inactive)}.` : '')
+        ` ${formatInactiveBackendSummary(session)}.`
+      );
+    }
+  } catch {
+    // best effort
+  }
+}
+
+async function interruptStaleWorkerSession(
+  sessionId: string,
+  payload: Pick<WorkerRegistration, 'workerId' | 'runtimeBuildId' | 'port' | 'pid'>,
+  compatibilityIssue: 'missing-runtime-build-id' | 'runtime-build-mismatch',
+  discordClient: Client
+): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  const shouldNotify = session.status !== 'interrupted' || session.workerId !== null;
+  if (shouldNotify) {
+    logger.warn(
+      `Rejecting stale worker for ${session.name}: daemon=${formatRuntimeBuildIdForLog(runtimeBuildId)} worker=${formatRuntimeBuildIdForLog(payload.runtimeBuildId)} issue=${compatibilityIssue}`
+    );
+  }
+
+  clearWorkerRuntime(session.id);
+  endSessionTurn(session.id);
+  markInterrupted(session.id);
+  updateSessionRuntime(session.id, {
+    workerId: null,
+    terminalHandle: null,
+    transportState: 'disconnected',
+    workerStatus: 'stopped',
+    pid: null,
+  });
+
+  if (shouldNotify) {
+    await postStaleWorkerInterruptedNotice(session.id, discordClient);
+  }
+
+  await terminateWorkerAtPort(session.id, payload.port, payload.pid);
+}
+
+async function terminateWorkerAtPort(sessionId: string, port: number, pid: number): Promise<void> {
+  const auth = getSessionInternalAuth(sessionId);
+  let terminated = false;
+
+  if (auth?.workerToken && Number.isFinite(port) && port > 0) {
+    const result = await requestWorkerTerminate(port, auth.workerToken);
+    terminated = result.ok;
+  }
+
+  if (!terminated) {
+    terminateWorkerProcess(pid);
+  }
+}
+
+async function postStaleWorkerInterruptedNotice(sessionId: string, discordClient: Client): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+  const orchestratorName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
+  try {
+    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+    if (channel) {
+      await channel.send(
+        `⚠ Session **${session.name}** was interrupted because its worker is running stale CC Conductor code. ` +
+        `Use \`${formatCommand(`resume ${session.name}`)}\` in #${orchestratorName} to start a fresh worker.`
       );
     }
   } catch {

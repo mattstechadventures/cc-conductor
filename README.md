@@ -44,7 +44,7 @@ The supported path is:
 - a custom Node MCP channel server for Discord transport
 - configurable agent backends through `DEFAULT_AGENT_BACKEND`, `ENABLED_AGENT_BACKENDS`, and `CODEX_BIN`
 
-`tmux` is legacy and optional. Bun is optional and not required for the supported path.
+`tmux` is legacy and optional. The legacy plugin directory is npm-managed and optional.
 
 Compatibility note: the repository/package slug remains `cc-conductor`, and the existing `CONDUCTOR_*` environment variables keep their names.
 

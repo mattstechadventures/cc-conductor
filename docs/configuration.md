@@ -78,7 +78,7 @@ flowchart LR
 ## Notes
 
 - The supported path uses a generated Node MCP server with Claude’s development-channel flag.
-- `tmux` and Bun are optional only. They are not required for the supported runtime.
+- `tmux` is optional only. The legacy plugin directory is npm-managed and not part of the supported runtime.
 - The new agent-backend settings are additive. They do not rename the existing `CONDUCTOR_*` env vars or the repository/package slug `cc-conductor`.
 - Configure `CODEX_BIN` before adding `codex` to `ENABLED_AGENT_BACKENDS`.
 - `COMMAND_PREFIX` must not contain whitespace. Invalid values fall back to `/`.

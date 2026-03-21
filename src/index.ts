@@ -20,6 +20,16 @@ for (const variable of REQUIRED_VARS) {
   }
 }
 
+function formatStartupError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (process.platform === 'win32' && /not a valid Win32 application/i.test(message)) {
+    return `${message}\n\nThis usually means node_modules was installed on a different OS, such as WSL/Linux, and is being reused on Windows.\nReinstall dependencies from PowerShell in this repo:\n  Remove-Item -Recurse -Force node_modules\n  npm install`;
+  }
+
+  return message;
+}
+
 async function main(): Promise<void> {
   logger.info('CC Conductor starting...');
   process.env.CONDUCTOR_RUNTIME_BUILD_ID = getRuntimeBuildId();
@@ -132,6 +142,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  logger.error(`Fatal error: ${err.message}`);
+  logger.error(`Fatal error: ${formatStartupError(err)}`);
   process.exit(1);
 });

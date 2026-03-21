@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * Discord Auto-Pair Channel Plugin for Claude Code (Conductor)
  *

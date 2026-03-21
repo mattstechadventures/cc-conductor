@@ -37,7 +37,7 @@ Optional:
 | Dependency | Purpose |
 |------------|---------|
 | `tmux` | Legacy backend only |
-| Bun | Optional for legacy plugin experiments only |
+| npm | Optional for the legacy plugin experiments in `plugin/discord-autopair/` |
 
 Claude Code must already be authenticated with a `claude.ai` account:
 
@@ -163,6 +163,7 @@ The daemon can restart without terminating live session workers.
 | Session falls back to PTY | The structured channel server is disconnected; inspect daemon logs and worker state under `data/sessions/<id>/` |
 | Startup fails on Claude version | Upgrade Claude Code to `2.1.80+` and confirm `claude --version` |
 | Startup fails on `tmux_session` schema | Delete `data/conductor.db`, `data/conductor.db-shm`, and `data/conductor.db-wal`, then restart |
+| `better_sqlite3.node is not a valid Win32 application` | Reinstall dependencies in the same OS shell you use to run Conductor. On Windows PowerShell: `Remove-Item -Recurse -Force node_modules; npm install`. Do not share `node_modules` between WSL and Windows |
 | Port 7842 already in use | Change `CONDUCTOR_API_PORT` |
 
 ## Automation Checklist

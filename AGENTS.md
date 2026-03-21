@@ -43,3 +43,6 @@ This repository is maintained as a cross-OS Claude Code session orchestrator. An
 - Move toward native PTY + structured transport.
 - Reduce direct `tmux` coupling over time.
 - Keep deployment scripts OS-specific, but keep the runtime itself cross-platform.
+
+## Outstanding Items
+- `better-sqlite3` currently pulls in deprecated `prebuild-install@7.1.3`, which npm warns about on install. This is a transitive dependency warning, not a security issue, but it should stay visible for future SQLite backend review work.

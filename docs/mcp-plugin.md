@@ -39,4 +39,4 @@ flowchart LR
 
 ## Legacy Plugin Path
 
-The plugin directory may still be useful for experimentation, but it is optional and not required for the main runtime.
+The plugin directory may still be useful for experimentation, but it is optional and not required for the main runtime. It runs under Node.js with `npm install` plus `npm run start` in `plugin/discord-autopair/`.

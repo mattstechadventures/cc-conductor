@@ -2,6 +2,33 @@
 
 Conductor turns a Discord server into a multi-session Claude Code control plane. Each session gets its own Discord channel, a detached worker process, a persistent Claude Code session, and a structured Discord transport through Claude Channels.
 
+## Visual Overview
+
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    User[Discord User] --> Orch[Orchestrator Channel]
+    Orch --> Daemon[Conductor Daemon]
+    Daemon --> DB[(SQLite State)]
+    Daemon --> Worker[Detached Session Worker]
+    Worker --> Claude[Claude Code CLI]
+    Claude --> Channel[Session Channel Server]
+    Channel --> Daemon
+    Daemon --> Session[Discord Session Channel]
+    Session --> User
+
+    classDef user fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1.5px;
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef session fill:#EEF2FF,stroke:#4F46E5,color:#312E81,stroke-width:1.5px;
+    classDef storage fill:#FFF7E6,stroke:#D97706,color:#7C2D12,stroke-width:1.5px;
+
+    class User,Orch,Session user;
+    class Daemon control;
+    class Worker,Claude,Channel runtime;
+    class DB storage;
+```
+
 ## Supported Runtime
 
 - Node.js 20+

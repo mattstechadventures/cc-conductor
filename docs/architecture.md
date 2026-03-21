@@ -2,6 +2,30 @@
 
 Conductor has three runtime roles.
 
+## Visual Overview
+
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    Discord[Discord Server] --> Daemon[Main Daemon]
+    Daemon --> DB[(SQLite)]
+    Daemon --> Worker[Session Worker]
+    Worker --> Claude[Claude Code]
+    Claude --> Channel[Channel Server]
+    Channel --> Daemon
+    Worker --> Logs[(Session Diagnostics)]
+
+    classDef edge fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1.5px;
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef storage fill:#FFF7E6,stroke:#D97706,color:#7C2D12,stroke-width:1.5px;
+
+    class Discord edge;
+    class Daemon control;
+    class Worker,Claude,Channel runtime;
+    class DB,Logs storage;
+```
+
 ## 1. Main Daemon
 
 The main daemon owns:

@@ -2,6 +2,34 @@
 
 The supported bridge is structured, not scraped.
 
+## Visual Overview
+
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    Msg[Discord Message] --> Transport{Channel Connected?}
+    Transport -->|Yes| Queue[Daemon Event Queue]
+    Queue --> Channel[Channel Server]
+    Channel --> Claude[Claude Session]
+    Claude --> Reply[reply or react tool]
+    Reply --> Daemon[Daemon Bot Client]
+    Daemon --> Discord[Discord Output]
+
+    Transport -->|No| Pty[PTY Fallback Input]
+    Pty --> Worker[Session Worker]
+    Worker --> Warn[Fallback Warning]
+
+    classDef edge fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1.5px;
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef warning fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px;
+
+    class Msg,Discord edge;
+    class Transport,Queue,Daemon control;
+    class Channel,Claude,Reply,Worker runtime;
+    class Pty,Warn warning;
+```
+
 ## Primary Path
 
 For active sessions with a connected channel server:

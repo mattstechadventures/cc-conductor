@@ -1,5 +1,31 @@
 # Cross-OS Native Implementation Plan
 
+## Visual Overview
+
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    Legacy[Legacy Runtime Assumptions] --> P1[Phase 1<br>Native Backend Layer]
+    P1 --> P2[Phase 2<br>Structured Bridge]
+    P2 --> P3[Phase 3<br>Resume and Health]
+    P3 --> P4[Phase 4<br>Cross-OS Docs and Deploy]
+    P4 --> Target[Supported Cross-OS Runtime]
+
+    Target --> Win[Windows]
+    Target --> Mac[macOS]
+    Target --> Linux[Linux]
+
+    classDef legacy fill:#F1F5F9,stroke:#94A3B8,color:#334155,stroke-width:1.5px,stroke-dasharray: 5 3;
+    classDef phase fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef target fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef platform fill:#EEF2FF,stroke:#4F46E5,color:#312E81,stroke-width:1.5px;
+
+    class Legacy legacy;
+    class P1,P2,P3,P4 phase;
+    class Target target;
+    class Win,Mac,Linux platform;
+```
+
 ## Goal
 Rework Conductor so the core product works natively on Windows, macOS, and Linux without requiring Unix-only infrastructure in the main execution path. The project should keep its current shape as a Discord-based Claude Code session orchestrator, but platform-specific behavior must be isolated behind explicit adapters.
 

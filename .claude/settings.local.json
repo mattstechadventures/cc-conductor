@@ -18,7 +18,14 @@
       "Bash(git rm:*)",
       "Bash(gh repo:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(claude:*)",
+      "Bash(brew info:*)",
+      "Bash(mkdir -p ~/.claude/channels/discord)",
+      "Bash(~/.claude/channels/discord/.env)",
+      "Bash(tmux new-session:*)",
+      "Bash(lsof -ti:7842)",
+      "Bash(node:*)"
     ]
   }
 }

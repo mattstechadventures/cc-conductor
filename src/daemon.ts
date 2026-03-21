@@ -9,7 +9,7 @@ import {
   getActiveSessions, updateSessionStatus, updateSessionActivity,
   deleteSession, markInterrupted,
 } from './sessions.js';
-import { createTmuxSession, sendKeys, sendEnter, killTmuxSession, tmuxSessionExists, getSessionPid, capturePaneOutput } from './tmux.js';
+import { createTmuxSession, sendKeys, sendEnter, sendTmuxRaw, killTmuxSession, tmuxSessionExists, getSessionPid, capturePaneOutput } from './tmux.js';
 import { buildClaudeCommand } from './pairing.js';
 import { resumeSession } from './resume.js';
 import { startBridge, stopBridge } from './bridge.js';
@@ -117,15 +117,24 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         await new Promise(resolve => setTimeout(resolve, 2000));
         const pane = capturePaneOutput(session.tmuxSession, 30);
 
-        // Auto-accept workspace trust prompt
-        if (pane.includes('Yes, I trust this folder') || pane.includes('Enter to confirm')) {
+        // Auto-accept workspace trust prompt ("Yes, I trust" is option 1, already selected)
+        if (pane.includes('Yes, I trust this folder')) {
           sendEnter(session.tmuxSession);
           await new Promise(resolve => setTimeout(resolve, 3000));
           continue;
         }
 
-        // Check if Claude Code is at the prompt (❯)
-        if (pane.includes('❯')) {
+        // Auto-accept bypass permissions prompt (need to select option 2 "Yes, I accept")
+        if (pane.includes('Yes, I accept') && pane.includes('No, exit')) {
+          sendTmuxRaw(session.tmuxSession, 'Down');
+          await new Promise(resolve => setTimeout(resolve, 500));
+          sendEnter(session.tmuxSession);
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          continue;
+        }
+
+        // Check if Claude Code is at the prompt (❯) and NOT in a menu
+        if (pane.includes('❯') && !pane.includes('Enter to confirm') && !pane.includes('Yes, I trust') && !pane.includes('Yes, I accept')) {
           ready = true;
           break;
         }

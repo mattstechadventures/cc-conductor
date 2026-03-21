@@ -33,6 +33,10 @@ export function sendEnter(sessionName: string): void {
   exec(`tmux send-keys -t ${quote(sessionName)} Enter`, 0);
 }
 
+export function sendTmuxRaw(sessionName: string, key: string): void {
+  exec(`tmux send-keys -t ${quote(sessionName)} ${key}`, 0);
+}
+
 export function killTmuxSession(sessionName: string): void {
   try {
     exec(`tmux kill-session -t ${quote(sessionName)}`, 0);

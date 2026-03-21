@@ -1,37 +1,36 @@
-/**
- * Terminal Bridge — relays messages between Discord channels and Claude Code tmux sessions.
- *
- * Discord → Claude Code: sends user messages via tmux send-keys
- * Claude Code → Discord: polls tmux capture-pane for new output, posts to Discord
- */
-
 import { Client, TextChannel } from 'discord.js';
-import { sendKeys, capturePaneOutput, tmuxSessionExists } from './tmux.js';
-import { updateSessionActivity, getSession } from './sessions.js';
+import {
+  applyWorkerHeartbeat,
+  clearRuntimeState,
+  ensureRuntimeState,
+  isChannelConnected,
+  markChannelConnected,
+  markChannelDisconnected,
+  queueChannelEvent,
+  registerWorkerRuntime,
+  waitForNextChannelEvent,
+} from './runtime-state.js';
+import { sendInputToWorker } from './worker-manager.js';
+import { getSession, updateSessionActivity, updateSessionRuntime } from './sessions.js';
 import { logger } from './logger.js';
-import type { Session, IndicatorMode } from './types.js';
+import type {
+  ChannelReactionPayload,
+  ChannelReplyPayload,
+  IndicatorMode,
+  Session,
+  WorkerHeartbeat,
+  WorkerRegistration,
+} from './types.js';
+
+const TYPING_INTERVAL_MS = 8_000;
+const DEGRADED_NOTICE_COOLDOWN_MS = 60_000;
 
 interface BridgeState {
-  session: Session;
-  pollTimer: ReturnType<typeof setInterval> | null;
-  /** The message we last sent — used to locate Claude's response in the pane */
-  lastSentMessage: string;
-  /** Whether we're waiting for Claude to finish responding */
-  waitingForResponse: boolean;
-  /** How many consecutive polls showed no pane change */
-  stableTicks: number;
-  /** Last captured pane for change detection */
-  lastPaneHash: string;
-  /** Whether we've already seen partial output (Claude started responding) */
-  sawOutput: boolean;
-  /** Interval timer for sending Discord typing indicators */
   typingTimer: ReturnType<typeof setInterval> | null;
+  degradedNoticeAt: number | null;
 }
 
 const bridges = new Map<string, BridgeState>();
-const POLL_MS = 1500;
-const TYPING_INTERVAL_MS = 8_000;
-
 let globalIndicatorMode: IndicatorMode = 'typing';
 
 export function getGlobalIndicatorMode(): IndicatorMode {
@@ -42,236 +41,224 @@ export function setGlobalIndicatorMode(mode: IndicatorMode): void {
   globalIndicatorMode = mode;
 }
 
+function getBridgeState(sessionId: string): BridgeState {
+  let state = bridges.get(sessionId);
+  if (!state) {
+    state = {
+      typingTimer: null,
+      degradedNoticeAt: null,
+    };
+    bridges.set(sessionId, state);
+  }
+  return state;
+}
+
 function getIndicatorMode(session: Session): IndicatorMode {
-  // Fresh read from DB
   const fresh = getSession(session.id);
   if (fresh?.indicatorMode) return fresh.indicatorMode;
-  if (globalIndicatorMode) return globalIndicatorMode;
   const env = process.env.INDICATOR_MODE as IndicatorMode | undefined;
+  if (globalIndicatorMode) return globalIndicatorMode;
   if (env === 'off' || env === 'typing') return env;
   return 'typing';
 }
-/** After this many stable polls while Claude is done, flush */
-const STABLE_THRESHOLD = 2;
 
-export function startBridge(session: Session, discordClient: Client): void {
-  if (bridges.has(session.id)) return;
-
-  const state: BridgeState = {
-    session,
-    pollTimer: null,
-    lastSentMessage: '',
-    waitingForResponse: false,
-    stableTicks: 0,
-    lastPaneHash: '',
-    sawOutput: false,
-    typingTimer: null,
-  };
-
-  state.pollTimer = setInterval(() => {
-    tick(state, discordClient).catch(err =>
-      logger.error(`Bridge tick error for ${session.name}: ${err.message}`)
-    );
-  }, POLL_MS);
-
-  bridges.set(session.id, state);
-  logger.info(`Bridge started for session ${session.name}`);
+export function startBridge(session: Session, _discordClient: Client): void {
+  ensureRuntimeState(session.id);
+  getBridgeState(session.id);
 }
 
 export function stopBridge(sessionId: string): void {
   const state = bridges.get(sessionId);
-  if (!state) return;
-  if (state.pollTimer) clearInterval(state.pollTimer);
-  if (state.typingTimer) clearInterval(state.typingTimer);
+  if (state?.typingTimer) {
+    clearInterval(state.typingTimer);
+  }
   bridges.delete(sessionId);
-  logger.info(`Bridge stopped for session ${state.session.name}`);
+  clearRuntimeState(sessionId);
 }
 
 export function stopAllBridges(): void {
-  for (const [id] of bridges) stopBridge(id);
+  for (const sessionId of [...bridges.keys()]) {
+    stopBridge(sessionId);
+  }
 }
 
-export function sendToSession(session: Session, message: string, discordClient?: Client): void {
-  if (!tmuxSessionExists(session.tmuxSession)) {
-    logger.warn(`Cannot send to ${session.name}: tmux session gone`);
-    return;
-  }
-
-  const state = bridges.get(session.id);
-  if (state) {
-    state.lastSentMessage = message;
-    state.waitingForResponse = true;
-    state.stableTicks = 0;
-    state.lastPaneHash = '';
-    state.sawOutput = false;
-    startTypingIndicator(state, discordClient || null);
-  }
-
-  sendKeys(session.tmuxSession, message);
+export async function sendToSession(
+  session: Session,
+  message: string,
+  discordClient?: Client
+): Promise<boolean> {
+  ensureRuntimeState(session.id);
   updateSessionActivity(session.id);
-  logger.info(`Bridge sent to ${session.name}: ${message.substring(0, 60)}`);
+  startTypingIndicator(session, discordClient || null);
+
+  if (process.env.STRUCTURED_TRANSPORT !== 'off' && isChannelConnected(session.id)) {
+    queueChannelEvent(session.id, {
+      content: message,
+      meta: {
+        chat_id: session.discordChannelId,
+        source: 'discord',
+        session_id: session.id,
+      },
+    });
+    updateSessionRuntime(session.id, {
+      transportKind: 'channel',
+      transportState: 'connected',
+    });
+    logger.info(`Queued structured channel event for ${session.name}`);
+    return true;
+  }
+
+  const sentViaWorker = await sendInputToWorker(session, message);
+  if (sentViaWorker) {
+    updateSessionRuntime(session.id, {
+      transportKind: 'pty_fallback',
+      transportState: 'degraded',
+    });
+    await maybePostDegradedNotice(session, discordClient || null);
+    logger.warn(`Structured transport unavailable for ${session.name}; used PTY fallback`);
+    return true;
+  }
+
+  stopTypingIndicator(session.id);
+  logger.warn(`No transport available for ${session.name}`);
+  return false;
 }
 
-// ── typing indicator ──
+export function registerWorker(sessionId: string, registration: WorkerRegistration): void {
+  ensureRuntimeState(sessionId);
+  registerWorkerRuntime(sessionId, registration);
+}
 
-function startTypingIndicator(state: BridgeState, discordClient: Client | null): void {
-  stopTypingIndicator(state);
+export function updateWorkerHeartbeat(sessionId: string, heartbeat: WorkerHeartbeat): void {
+  ensureRuntimeState(sessionId);
+  applyWorkerHeartbeat(sessionId, heartbeat);
+}
+
+export function registerChannel(sessionId: string): void {
+  ensureRuntimeState(sessionId);
+  markChannelConnected(sessionId);
+}
+
+export function disconnectChannel(sessionId: string): void {
+  ensureRuntimeState(sessionId);
+  markChannelDisconnected(sessionId);
+}
+
+export async function nextChannelEvent(sessionId: string, timeoutMs: number) {
+  return await waitForNextChannelEvent(sessionId, timeoutMs);
+}
+
+export async function handleChannelReply(
+  sessionId: string,
+  payload: ChannelReplyPayload,
+  discordClient: Client
+): Promise<void> {
+  stopTypingIndicator(sessionId);
+
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  updateSessionActivity(sessionId);
+  updateSessionRuntime(sessionId, {
+    transportKind: 'channel',
+    transportState: 'connected',
+  });
+
+  const channel = await discordClient.channels.fetch(payload.chatId) as TextChannel | null;
+  if (!channel) return;
+
+  for (const chunk of splitMsg(payload.message, 1900)) {
+    await channel.send(chunk);
+  }
+}
+
+export async function handleChannelReaction(
+  sessionId: string,
+  payload: ChannelReactionPayload,
+  discordClient: Client
+): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  updateSessionActivity(sessionId);
+  updateSessionRuntime(sessionId, {
+    transportKind: 'channel',
+    transportState: 'connected',
+  });
+
+  const channel = await discordClient.channels.fetch(payload.chatId) as TextChannel | null;
+  if (!channel) return;
+
+  const message = await channel.messages.fetch(payload.messageId);
+  await message.react(payload.emoji);
+}
+
+export async function handleWorkerNotice(
+  sessionId: string,
+  message: string,
+  discordClient: Client
+): Promise<void> {
+  stopTypingIndicator(sessionId);
+
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  updateSessionActivity(sessionId);
+
+  const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+  if (!channel) return;
+
+  for (const chunk of splitMsg(message, 1900)) {
+    await channel.send(chunk);
+  }
+}
+
+function startTypingIndicator(session: Session, discordClient: Client | null): void {
+  const state = getBridgeState(session.id);
+  stopTypingIndicator(session.id);
   if (!discordClient) return;
-  if (getIndicatorMode(state.session) !== 'typing') return;
+  if (getIndicatorMode(session) !== 'typing') return;
 
   const send = async () => {
     try {
-      const channel = await discordClient.channels.fetch(state.session.discordChannelId) as TextChannel | null;
-      if (channel) await channel.sendTyping();
+      const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+      if (channel) {
+        await channel.sendTyping();
+      }
     } catch {
       // best effort
     }
   };
 
-  // Fire immediately, then repeat
-  send();
-  state.typingTimer = setInterval(send, TYPING_INTERVAL_MS);
+  send().catch(() => {});
+  state.typingTimer = setInterval(() => {
+    send().catch(() => {});
+  }, TYPING_INTERVAL_MS);
 }
 
-function stopTypingIndicator(state: BridgeState): void {
-  if (state.typingTimer) {
+function stopTypingIndicator(sessionId: string): void {
+  const state = bridges.get(sessionId);
+  if (state?.typingTimer) {
     clearInterval(state.typingTimer);
     state.typingTimer = null;
   }
 }
 
-// ── internal ──
-
-async function tick(state: BridgeState, discordClient: Client): Promise<void> {
-  if (!state.waitingForResponse) return;
-  if (!tmuxSessionExists(state.session.tmuxSession)) {
-    stopBridge(state.session.id);
+async function maybePostDegradedNotice(session: Session, discordClient: Client | null): Promise<void> {
+  const state = getBridgeState(session.id);
+  if (!discordClient) return;
+  if (state.degradedNoticeAt && Date.now() - state.degradedNoticeAt < DEGRADED_NOTICE_COOLDOWN_MS) {
     return;
   }
 
-  const pane = capturePaneOutput(state.session.tmuxSession, 500);
-  const paneHash = simpleHash(pane);
-
-  // Check if pane changed
-  if (paneHash === state.lastPaneHash) {
-    state.stableTicks++;
-  } else {
-    state.stableTicks = 0;
-    state.lastPaneHash = paneHash;
-  }
-
-  // Look for Claude's response: find content between our sent message and the final ❯ prompt
-  const response = extractResponse(pane, state.lastSentMessage);
-
-  if (response) {
-    state.sawOutput = true;
-  }
-
-  // Check if Claude is back at the prompt (done responding).
-  // Use last 12 lines — the status bar on Mac can be 6+ lines
-  // (separator, status, mode, update banner, blanks).
-  const lines = pane.trimEnd().split('\n');
-  const lastFewLines = lines.slice(-12).join('\n');
-  const atPrompt = lastFewLines.includes('❯') &&
-    !lastFewLines.includes('Running') &&
-    !lastFewLines.includes('Waiting') &&
-    !lastFewLines.includes('Simmering');
-
-  // Flush when: Claude is at prompt AND pane is stable AND we have output
-  if (atPrompt && state.stableTicks >= STABLE_THRESHOLD && response) {
-    await flushResponse(state, response, discordClient);
-  }
-}
-
-/**
- * Extract Claude's response text from the pane.
- * Finds everything between the sent message and the final ❯ prompt.
- */
-function extractResponse(pane: string, sentMessage: string): string | null {
-  if (!sentMessage) return null;
-
-  // Find the sent message in the pane (use first 50 chars to avoid wrapping issues)
-  const searchStr = sentMessage.substring(0, 50);
-  const msgIdx = pane.lastIndexOf(searchStr);
-  if (msgIdx === -1) return null;
-
-  // Skip past the sent message line
-  const afterMsg = pane.slice(msgIdx + searchStr.length);
-  const lines = afterMsg.split('\n');
-
-  // Skip the rest of the message line
-  const responseLines: string[] = [];
-  let started = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    // Skip empty lines at the start
-    if (!started && !trimmed) continue;
-
-    // Skip the input line itself (may wrap)
-    if (!started && trimmed === sentMessage.substring(50).trim()) continue;
-
-    // Start collecting after we see Claude's output marker.
-    // Different Claude Code versions use different bullet characters:
-    //   ⏺ (U+23FA), ● (U+25CF), ○ (U+25CB), • (U+2022)
-    // Note: ⏵ (U+23F5) is excluded — it appears in the status bar ("⏵⏵ accept edits on")
-    const OUTPUT_MARKERS = ['⏺', '●', '○', '•'];
-    if (!started && OUTPUT_MARKERS.some(m => trimmed.startsWith(m))) {
-      started = true;
-    }
-
-    if (started) {
-      // Stop at the final prompt
-      if (trimmed === '❯') break;
-      // Stop at status bar
-      if (trimmed.startsWith('📁')) break;
-      // Stop at separator lines
-      if (/^─{20,}$/.test(trimmed)) break;
-
-      responseLines.push(line);
-    }
-  }
-
-  if (responseLines.length === 0) return null;
-
-  // Clean the output
-  const cleaned = responseLines
-    .map(l => l
-      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')  // ANSI codes
-      .replace(/\x1b\][^\x07]*\x07/g, '')       // OSC sequences
-    )
-    .join('\n')
-    .trim();
-
-  return cleaned || null;
-}
-
-async function flushResponse(state: BridgeState, response: string, discordClient: Client): Promise<void> {
-  stopTypingIndicator(state);
-  state.waitingForResponse = false;
-  state.stableTicks = 0;
-
+  state.degradedNoticeAt = Date.now();
   try {
-    const channel = await discordClient.channels.fetch(state.session.discordChannelId) as TextChannel | null;
+    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
     if (!channel) return;
-
-    const chunks = splitMsg(response, 1900);
-    for (const chunk of chunks) {
-      await channel.send(chunk);
-    }
-    logger.info(`Bridge flushed ${response.length} chars to Discord for ${state.session.name}`);
-  } catch (err: any) {
-    logger.error(`Bridge flush error for ${state.session.name}: ${err.message}`);
+    await channel.send('Structured transport is disconnected. Your message was sent through the PTY fallback, so replies may not mirror back to Discord until the channel reconnects.');
+  } catch {
+    // best effort
   }
-}
-
-function simpleHash(s: string): string {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-  }
-  return h.toString(36);
 }
 
 function splitMsg(text: string, max: number): string[] {

@@ -1,28 +1,17 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
-import path from 'path';
 import { Client, TextChannel } from 'discord.js';
-import type { Session, Checkpoint, CheckpointMessage } from './types.js';
-import { updateCheckpoint } from './sessions.js';
-import { capturePaneOutput, sendKeys, tmuxSessionExists } from './tmux.js';
+import type { Checkpoint, CheckpointMessage, Session } from './types.js';
 import { logger } from './logger.js';
-
-const CHECKPOINT_FILENAME = '.conductor-checkpoint.json';
+import { updateCheckpoint } from './sessions.js';
+import { getCheckpointPath } from './state.js';
 
 export async function writeCheckpoint(session: Session, discordClient: Client): Promise<string> {
-  const checkpointPath = path.join(session.projectDir, CHECKPOINT_FILENAME);
+  const checkpointPath = getCheckpointPath(session.projectDir);
   const messageCount = parseInt(process.env.CHECKPOINT_DISCORD_MESSAGES || '50', 10);
-
-  // 1. Fetch recent Discord messages
   const recentMessages = await fetchDiscordMessages(session.discordChannelId, discordClient, messageCount);
-
-  // 2. Read git state
   const { branch: gitBranch, lastCommit: gitLastCommit } = readGitState(session.projectDir);
 
-  // 3. Request task summary from Claude (best-effort)
-  const taskSummary = await requestTaskSummary(session);
-
-  // 4. Write checkpoint
   const checkpoint: Checkpoint = {
     sessionId: session.id,
     sessionName: session.name,
@@ -30,24 +19,20 @@ export async function writeCheckpoint(session: Session, discordClient: Client): 
     writtenAt: Date.now(),
     gitBranch,
     gitLastCommit,
-    taskSummary,
+    taskSummary: inferTaskSummary(recentMessages),
     recentMessages,
   };
 
   fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2));
-
-  // 5. Update DB
   updateCheckpoint(session.id, checkpointPath);
-
   logger.info(`Checkpoint written for session ${session.name}: ${checkpointPath}`);
   return checkpointPath;
 }
 
 export function readCheckpoint(session: Session): Checkpoint | null {
-  const checkpointPath = path.join(session.projectDir, CHECKPOINT_FILENAME);
+  const checkpointPath = getCheckpointPath(session.projectDir);
   try {
-    const data = fs.readFileSync(checkpointPath, 'utf-8');
-    return JSON.parse(data) as Checkpoint;
+    return JSON.parse(fs.readFileSync(checkpointPath, 'utf-8')) as Checkpoint;
   } catch {
     return null;
   }
@@ -65,15 +50,8 @@ export function startCheckpointScheduler(
     return;
   }
 
-  checkpointTimer = setInterval(async () => {
-    const sessions = getActiveSessions();
-    for (const session of sessions) {
-      try {
-        await writeCheckpoint(session, discordClient);
-      } catch (err: any) {
-        logger.error(`Checkpoint failed for session ${session.name}: ${err.message}`);
-      }
-    }
+  checkpointTimer = setInterval(() => {
+    void flushAllCheckpoints(getActiveSessions(), discordClient);
   }, intervalMins * 60 * 1000);
 
   logger.info(`Checkpoint scheduler started: every ${intervalMins} minutes`);
@@ -87,16 +65,12 @@ export function stopCheckpointScheduler(): void {
 }
 
 export async function flushAllCheckpoints(sessions: Session[], discordClient: Client): Promise<void> {
-  const results = await Promise.allSettled(
-    sessions.map(s => writeCheckpoint(s, discordClient))
-  );
-  const failed = results.filter(r => r.status === 'rejected').length;
+  const results = await Promise.allSettled(sessions.map(session => writeCheckpoint(session, discordClient)));
+  const failed = results.filter(result => result.status === 'rejected').length;
   if (failed > 0) {
     logger.warn(`${failed}/${sessions.length} checkpoint flushes failed`);
   }
 }
-
-// --- Internal helpers ---
 
 async function fetchDiscordMessages(
   channelId: string,
@@ -110,10 +84,10 @@ async function fetchDiscordMessages(
     const messages = await channel.messages.fetch({ limit: Math.min(count, 100) });
     return messages
       .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-      .map(msg => ({
-        author: msg.author.bot ? 'claude' : msg.author.displayName || msg.author.username,
-        content: msg.content,
-        timestamp: msg.createdTimestamp,
+      .map(message => ({
+        author: message.author.bot ? 'claude' : message.author.displayName || message.author.username,
+        content: message.content,
+        timestamp: message.createdTimestamp,
       }));
   } catch (err: any) {
     logger.error(`Failed to fetch Discord messages for channel ${channelId}: ${err.message}`);
@@ -123,42 +97,35 @@ async function fetchDiscordMessages(
 
 function readGitState(dir: string): { branch: string | null; lastCommit: string | null } {
   try {
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir, encoding: 'utf-8', timeout: 5000 }).trim();
-    const lastCommit = execSync('git log -1 --oneline', { cwd: dir, encoding: 'utf-8', timeout: 5000 }).trim();
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: dir,
+      encoding: 'utf-8',
+      timeout: 5_000,
+    }).trim();
+    const lastCommit = execSync('git log -1 --oneline', {
+      cwd: dir,
+      encoding: 'utf-8',
+      timeout: 5_000,
+    }).trim();
     return { branch, lastCommit };
   } catch {
     return { branch: null, lastCommit: null };
   }
 }
 
-async function requestTaskSummary(session: Session): Promise<string | null> {
-  if (!tmuxSessionExists(session.tmuxSession)) return null;
+function inferTaskSummary(messages: CheckpointMessage[]): string | null {
+  if (messages.length === 0) return null;
+  const latestClaude = [...messages].reverse().find(message => message.author === 'claude');
+  const latestUser = [...messages].reverse().find(message => message.author !== 'claude');
 
-  try {
-    // Send the checkpoint prompt
-    sendKeys(
-      session.tmuxSession,
-      '[CONDUCTOR_CHECKPOINT] Summarise in 2-3 sentences what you are currently working on or were last working on.'
-    );
-
-    // Wait up to 10 seconds for output
-    await new Promise(resolve => setTimeout(resolve, 10_000));
-
-    // Capture pane output and try to extract the summary
-    const output = capturePaneOutput(session.tmuxSession, 30);
-    if (!output) return null;
-
-    // Look for lines after the checkpoint prompt
-    const lines = output.split('\n');
-    const promptIdx = lines.findIndex(l => l.includes('[CONDUCTOR_CHECKPOINT]'));
-    if (promptIdx === -1) return null;
-
-    const summaryLines = lines
-      .slice(promptIdx + 1)
-      .filter(l => l.trim() && !l.includes('[CONDUCTOR_CHECKPOINT]'));
-
-    return summaryLines.length > 0 ? summaryLines.join('\n').trim() : null;
-  } catch {
-    return null;
+  if (latestClaude && latestUser) {
+    return `Latest user request: ${truncate(latestUser.content)}\nLatest Claude reply: ${truncate(latestClaude.content)}`;
   }
+
+  return truncate(messages[messages.length - 1].content);
+}
+
+function truncate(text: string, max = 240): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 3)}...`;
 }

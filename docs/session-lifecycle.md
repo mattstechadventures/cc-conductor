@@ -2,67 +2,47 @@
 
 ## States
 
-```
-starting → active → idle → dead
-                ↘         ↗
-              interrupted
-                    ↓
-                 (resume)
-                    ↓
-                starting → ...
-```
+`starting -> active -> idle -> dead`
 
-| Status | Meaning |
-|--------|---------|
-| `starting` | tmux session created, Claude Code launching, waiting for prompt |
-| `active` | Claude Code is at the prompt, bridge is running |
-| `idle` | No messages for a while (tracked via `lastActiveAt`) |
-| `interrupted` | tmux session died or Claude Code crashed |
-| `dead` | Session was killed (idle timeout or `/kill`) |
+`starting/active/idle -> interrupted -> resume -> starting`
 
 ## Spawn Flow
 
-1. **Validate** — check name format, no duplicates, under `MAX_SESSIONS`
-2. **Create project directory** — `mkdir -p` if it doesn't exist
-3. **Create Discord channel** — text channel under the Conductor category, topic set to session info
-4. **Create DB record** — session ID is `nanoid(8)`, status `starting`
-5. **Create tmux session** — `tmux new-session -d -s conductor-<name> -c <projectDir>`
-6. **Launch Claude Code** — `claude --permission-mode acceptEdits`
-7. **Wait for prompt** (up to 30 seconds):
-   - Auto-accept "Yes, I trust this folder" — sends Enter
-   - Auto-accept "Yes, I accept" permission prompt — sends Down + Enter
-   - Ready when `❯` appears without menu text
-8. **Start bridge** — begin polling tmux pane
-9. **Post ready message** — `✓ Session <name> is live.`
+1. Validate the session name and concurrency limit.
+2. Create the project directory if needed.
+3. Create the Discord session channel.
+4. Insert the session row with backend-neutral runtime fields.
+5. Register the session channel server in Claude's local MCP scope for that project.
+6. Spawn the detached worker.
+7. Worker launches Claude Code through the selected terminal backend.
+8. Worker launches Claude with the session root and any persisted `additionalDirs`.
+9. Worker auto-accepts trust, development channel, and Claude tool permission prompts if they appear, including the newer `Do you want to proceed?` approval dialog.
+10. If Claude asks for access outside the allowed directories, the worker dismisses that prompt and posts a Discord notice explaining how to add the path explicitly.
+11. If the worker does not reach ready, Conductor deletes the just-created session row and Discord channel, but keeps `data/sessions/<id>/` for diagnostics.
+12. Worker reports readiness through the daemon internal route.
+13. The daemon marks the session active and posts the ready notice.
 
-## Idle Tracking
+## Active Behavior
 
-Every message relayed through the bridge updates `lastActiveAt` via `updateSessionActivity()`. The ping endpoint (`POST /sessions/:id/ping`) also updates this timestamp.
+- The worker keeps the Claude process alive.
+- The channel server handles structured Discord traffic.
+- The daemon tracks activity, transport state, and worker heartbeat.
+- `<prefix>add-dir` persists a new allowed directory and restarts the session so the next Claude launch includes `--add-dir <path>`.
 
-The health monitor checks `lastActiveAt` every 60 seconds. If a session exceeds `SESSION_IDLE_TIMEOUT_MINS` (default 120), it is killed and set to `dead`.
+## Interruptions
+
+A session becomes interrupted when:
+
+- the worker exits
+- the Claude process dies
+- the daemon cannot reattach to a live worker during startup reconciliation
+
+Failed resume attempts keep the session interrupted and surface the worker diagnostic path.
 
 ## Termination
 
-Sessions end in one of three ways:
+`<prefix>kill` stops the worker, removes the session-scoped Claude MCP entry, clears runtime state, and archives or deletes the Discord channel.
 
-### 1. User kills it (`/kill`)
-- Confirmation button required
-- Bridge stopped, tmux killed, channel archived/deleted, DB record removed
+With the default config, `<prefix>` is `/`.
 
-### 2. Idle timeout
-- Health monitor detects idle time exceeding threshold
-- Warning posted to Discord channel
-- tmux session killed, status set to `dead`
-
-### 3. Process crash (→ interrupted)
-- Health monitor detects tmux session is gone
-- Status set to `interrupted`, `interruptedAt` timestamp saved
-- Warning posted to Discord channel with resume instructions
-- Session can be recovered via `/resume`
-
-## Channel Management
-
-- Session channels are created under a "Conductor" category (auto-created on first startup)
-- Channel topic is set to `Claude Code session: <name> | Dir: <projectDir>`
-- On kill with `ARCHIVE_ON_KILL=true`: channel renamed to `archive-<name>`, moved to "Archive" category
-- On kill with `ARCHIVE_ON_KILL=false`: channel deleted
+Idle timeout marks the session `dead` and stops the worker.

@@ -1,117 +1,72 @@
 # Architecture
 
-## Components
+Conductor has three runtime roles.
 
-Conductor consists of five main components:
+## 1. Main Daemon
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    Discord Server                         │
-│                                                          │
-│  #orchestrator          #session-foo     #session-bar    │
-│  (control plane)        (session ch)     (session ch)    │
-└──────────┬──────────────────┬────────────────┬───────────┘
-           │                  │                │
-           ▼                  ▼                ▼
-┌──────────────────────────────────────────────────────────┐
-│                 Conductor Daemon (Node.js)                │
-│                                                          │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐  │
-│  │ Discord  │ │ Express  │ │ Health   │ │ Checkpoint │  │
-│  │ Bot      │ │ API      │ │ Monitor  │ │ Scheduler  │  │
-│  │ (bot.ts) │ │(daemon.ts│ │(daemon.ts│ │(checkpoint │  │
-│  │          │ │)         │ │)         │ │.ts)        │  │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘  │
-│                       │                                  │
-│              ┌────────┴────────┐                         │
-│              │  Bridge Layer   │                         │
-│              │  (bridge.ts)    │                         │
-│              └────────┬────────┘                         │
-│                       │                                  │
-│              ┌────────┴────────┐                         │
-│              │  tmux Wrapper   │                         │
-│              │  (tmux.ts)      │                         │
-│              └────────┬────────┘                         │
-│                       │                                  │
-│              ┌────────┴────────┐                         │
-│              │  SQLite DB      │                         │
-│              │  (sessions.ts)  │                         │
-│              └─────────────────┘                         │
-└──────────────────────────────────────────────────────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────────────────┐
-│                    tmux Sessions                          │
-│                                                          │
-│  conductor-foo            conductor-bar                  │
-│  └─ claude --permission   └─ claude --permission         │
-│     -mode acceptEdits        -mode acceptEdits           │
-└──────────────────────────────────────────────────────────┘
-```
+The main daemon owns:
 
-### 1. Discord Bot (`src/bot.ts`)
-Handles command parsing in #orchestrator and relays user messages from session channels to the bridge. Creates the "Conductor" category and #orchestrator channel on startup.
+- the Discord bot client
+- the localhost REST API
+- SQLite persistence
+- startup compatibility checks for the DB schema and Claude Code version
+- session reconciliation
+- health monitoring
+- checkpoint scheduling
+- internal localhost routes for workers and channel servers
 
-### 2. Express API (`src/daemon.ts`)
-REST API on `localhost:7842` for session lifecycle operations (spawn, delete, list, resume). The Discord bot calls the API internally to handle commands.
+The daemon is the only Discord gateway client in the system.
 
-### 3. Terminal Bridge (`src/bridge.ts`)
-Polls tmux pane output every 1.5 seconds, detects Claude's responses via output markers, and posts them to Discord. Relays user messages from Discord to Claude via `tmux send-keys`.
+## 2. Session Worker
 
-### 4. SQLite Database (`src/sessions.ts`)
-Persists session state to `data/conductor.db` using better-sqlite3 with WAL mode. Tracks session metadata, status, checkpoints, and resume counts.
+Each session runs in a detached worker process. The worker owns:
 
-### 5. tmux Sessions (`src/tmux.ts`)
-Each Claude Code instance runs in a named tmux session (`conductor-<name>`). The bridge reads output via `tmux capture-pane` and sends input via `tmux send-keys`.
+- the persistent Claude Code process
+- the terminal backend, with `node-pty` as the supported default
+- startup readiness detection
+- the session root plus any persisted `additionalDirs`
+- trust, development-channel, and Claude tool approval auto-accept flows
+- outside-directory prompt rejection and user-visible blocked-path notices
+- session-local worker and terminal diagnostics under `data/sessions/<sessionId>/`
+- local worker control endpoints for fallback input and shutdown
 
-## Data Flows
+Workers survive daemon restarts and reconnect to the daemon over localhost.
 
-### New Session
-```
-User → /new myapp → Discord Bot → POST /sessions/spawn → Daemon
-  → Create Discord channel
-  → Create DB record
-  → Create tmux session
-  → Send `claude --permission-mode acceptEdits`
-  → Wait for Claude prompt (auto-accept trust/permission dialogs)
-  → Start bridge
-  → Post ready message
-```
+## 3. Channel Server
 
-### Message Relay
-```
-User types in #myapp
-  → Discord message event → sendToSession()
-  → tmux send-keys to conductor-myapp
-  → Bridge polls tmux capture-pane every 1.5s
-  → Detects Claude's response (output markers + prompt)
-  → Waits for stable pane (2 consecutive identical polls)
-  → Posts response to Discord (split at 1900 chars)
-```
+Each Claude session loads a generated Node MCP channel server through Claude Code. The channel server:
 
-### Graceful Shutdown
-```
-SIGTERM/SIGINT received
-  → Post offline notice to #orchestrator
-  → Flush all active checkpoints
-  → Stop health monitor, checkpoint scheduler, all bridges
-  → Kill all tmux sessions
-  → Close DB, destroy Discord client
-  → Exit
-```
+- declares `claude/channel`
+- is registered in Claude's local MCP scope for the session project before launch
+- is selected through Claude's development channel loader: `--dangerously-load-development-channels server:<session-server-name>`
+- launches through the Conductor repo's own resolved `tsx` loader path, not the session project's cwd
+- long-polls the daemon for inbound Discord messages
+- emits `notifications/claude/channel` into the live Claude session
+- exposes `reply` and `react` tools that call back into the daemon
 
-## File Map
+This is the source of truth for Claude replies in the supported path.
 
-| File | Purpose |
-|------|---------|
-| `src/index.ts` | Entry point — init, startup sequence, shutdown handler |
-| `src/bot.ts` | Discord client, command handlers, message relay |
-| `src/daemon.ts` | Express API, spawn/delete/list/resume, health monitor |
-| `src/sessions.ts` | SQLite CRUD, migrations |
-| `src/tmux.ts` | tmux command wrappers with retries |
-| `src/bridge.ts` | Polling bridge: tmux ↔ Discord |
-| `src/checkpoint.ts` | Checkpoint writing, scheduling, git/Discord capture |
-| `src/resume.ts` | Session recovery, reconciliation, resume prompt builder |
-| `src/pairing.ts` | Claude Code command builder |
-| `src/logger.ts` | Structured timestamped logging |
-| `src/types.ts` | TypeScript interfaces |
+## Transport Rules
+
+- Inbound Discord message:
+  - first choice: structured channel event
+  - fallback: PTY raw input if the channel transport is disconnected
+- Outbound Claude reply:
+  - only through the channel server `reply` / `react` tools
+
+Conductor no longer depends on pane scraping to mirror Claude replies.
+
+## Persistence Model
+
+SQLite stores generic runtime state:
+
+- worker identity
+- terminal backend and handle
+- transport kind and state
+- Claude session name and resume reference
+- lifecycle status and timestamps
+- checkpoint path and resume count
+
+Legacy `tmux_session` is kept only for compatibility.
+
+Legacy DB files with `tmux_session NOT NULL` are rejected at startup rather than migrated in place.

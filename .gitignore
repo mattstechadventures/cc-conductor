@@ -6,3 +6,5 @@ data/conductor.db-wal
 .env
 *.log
 plugin/discord-autopair/node_modules/
+
+data/sessions/

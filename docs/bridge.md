@@ -1,66 +1,40 @@
 # Message Bridge
 
-The bridge (`src/bridge.ts`) is the core relay between Discord and Claude Code. It uses tmux pane polling to read Claude's output and `tmux send-keys` to send user input.
+The supported bridge is structured, not scraped.
 
-## How It Works
+## Primary Path
 
-### Discord → Claude Code
+For active sessions with a connected channel server:
 
-When a user posts in a session channel:
-1. `sendToSession()` is called with the message text
-2. The message is sent to the tmux session via `tmux send-keys <msg> Enter`
-3. Bridge state is updated: `waitingForResponse = true`, counters reset
-4. The typing indicator starts (if enabled) — fires `channel.sendTyping()` immediately and every 8 seconds
-5. `lastActiveAt` is updated in the database
+1. A Discord message arrives in a session channel.
+2. Conductor registers a session-specific local-scope MCP server in Claude Code for that project.
+3. The daemon queues a `notifications/claude/channel` event for that session.
+4. Claude launches with the session's persisted `additionalDirs` as `--add-dir` arguments.
+5. Claude loads the registered channel server through `--dangerously-load-development-channels server:<session-server-name>`.
+6. The session channel server long-polls the daemon and forwards the event into Claude Code.
+7. Claude replies by calling the channel server `reply` or `react` tool.
+8. The channel server posts that tool call back to the daemon.
+9. The daemon sends the reply or reaction through the Discord bot.
 
-### Claude Code → Discord
+Claude replies do not come from terminal capture in this path.
+The registered local-scope server pins the repo-local `tsx` loader by absolute path so channel startup does not depend on the session project's current working directory.
+Worker readiness is held behind Claude's startup gates: folder trust, development-channel consent, and tool approval prompts must clear before the session is treated as ready, and the worker only marks ready once Claude's live session UI is visible.
+If Claude requests access outside the session root plus `additionalDirs`, the worker dismisses that approval prompt and the daemon posts an explicit Discord notice instead of leaving the session hanging.
 
-The bridge polls the tmux pane every 1.5 seconds:
-1. `capturePaneOutput()` captures the last 500 lines of the tmux pane
-2. A simple hash detects whether the pane changed since last poll
-3. `extractResponse()` locates Claude's response in the pane output
-4. When the pane is stable (2 consecutive identical polls) and Claude is at the `❯` prompt, the response is flushed to Discord
+## PTY Fallback
 
-## Response Extraction
+If the structured channel server is disconnected:
 
-`extractResponse()` parses the raw terminal output:
+1. The daemon sends raw input to the session worker.
+2. The session is marked `transport_state=degraded`.
+3. Discord receives a warning that fallback is active.
 
-1. **Find the sent message** — searches for the first 50 characters of the user's message (using `lastIndexOf` to handle repeated messages)
-2. **Skip to output** — looks for Claude's output marker characters: `⏺`, `●`, `○`, `•` (different Claude Code versions use different bullets). Note: `⏵` is explicitly excluded — it appears in the status bar.
-3. **Collect lines** — gathers everything until hitting a stop marker:
-   - `❯` — Claude's prompt (done responding)
-   - `📁` — status bar
-   - `─` repeated 20+ times — separator line
-4. **Clean output** — strips ANSI escape codes (`\x1b[...`) and OSC sequences (`\x1b]...\x07`)
+Fallback input exists for emergencies only. It is not the supported mirrored reply path.
 
-## Stability Detection
+## Typing Indicator
 
-The bridge doesn't flush output immediately. It waits for:
-- Claude to be at the prompt (`❯` in last 12 lines, no "Running"/"Waiting"/"Simmering" status)
-- The pane to be stable for `STABLE_THRESHOLD` (2) consecutive polls
-- A response to have been detected
+The daemon starts the Discord typing indicator when a user message is forwarded and stops it when a channel reply is received.
 
-This prevents partial output from being sent to Discord.
+Global and per-session indicator settings still use `<prefix>mode`. With the default config, `<prefix>` is `/`.
 
-## Message Splitting
-
-Discord has a 2000-character message limit. The bridge splits responses at 1900 characters, preferring to break at newlines. Each chunk is sent as a separate Discord message.
-
-## Bridge State
-
-Each active session has a `BridgeState`:
-
-| Field | Purpose |
-|-------|---------|
-| `lastSentMessage` | The last Discord message sent to Claude (used to locate response in pane) |
-| `waitingForResponse` | Whether we're expecting Claude to respond |
-| `stableTicks` | Consecutive polls with no pane change |
-| `lastPaneHash` | Hash of last captured pane for change detection |
-| `sawOutput` | Whether we've detected any output markers |
-| `typingTimer` | Interval timer for Discord typing indicator (cleared on flush/stop) |
-
-## Lifecycle
-
-- `startBridge(session, client)` — creates a polling interval for the session
-- `stopBridge(sessionId)` — clears the interval
-- `stopAllBridges()` — stops all bridges (called during shutdown)
+Worker startup and terminal diagnostics for the fallback path are written under `data/sessions/<sessionId>/`.

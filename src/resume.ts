@@ -1,104 +1,106 @@
 import fs from 'fs';
-import path from 'path';
 import { Client, TextChannel } from 'discord.js';
-import type { Session, Checkpoint, CheckpointMessage, ReconciliationReport, ResumeResult } from './types.js';
+import type { Checkpoint, CheckpointMessage, ReconciliationReport, ResumeResult, Session } from './types.js';
 import {
-  getAllSessions, getSession, markInterrupted, updateSessionStatus,
-  incrementResumeCount, deleteSession,
+  deleteSession,
+  getAllSessions,
+  getSession,
+  incrementResumeCount,
+  markInterrupted,
+  updateSessionRuntime,
+  updateSessionStatus,
 } from './sessions.js';
-import {
-  tmuxSessionExists, getSessionPid, killTmuxSession, createTmuxSession, sendKeys,
-} from './tmux.js';
 import { readCheckpoint } from './checkpoint.js';
-import { buildClaudeCommand } from './pairing.js';
 import { startBridge } from './bridge.js';
 import { logger } from './logger.js';
+import { getWorkerRuntime } from './runtime-state.js';
+import { getResumePromptPath } from './state.js';
+import { spawnSessionWorker, terminateSessionWorker } from './worker-manager.js';
+import { formatCommand } from './command-prefix.js';
 
-const RESUME_PROMPT_FILENAME = '.conductor-resume-prompt.md';
-
-// Case 1: Conductor restarted, tmux session still alive — just reconnect
 export async function reattachSession(session: Session, discordClient: Client): Promise<void> {
-  // The Claude process is still running in tmux, we just lost our in-memory state.
-  // The plugin subprocess should also still be running, but we post a reconnection notice.
+  const worker = getWorkerRuntime(session.id);
+  updateSessionStatus(session.id, 'active', worker?.claudePid ?? null);
+  startBridge(session, discordClient);
+
   try {
     const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
     if (channel) {
-      await channel.send(`↺ Conductor restarted — session **${session.name}** reconnected.`);
+      await channel.send(`↺ Conductor restarted. Session **${session.name}** reconnected.`);
     }
   } catch (err: any) {
     logger.error(`Failed to post reattach notice for ${session.name}: ${err.message}`);
   }
-
-  updateSessionStatus(session.id, 'active', getSessionPid(session.tmuxSession) ?? undefined);
-  startBridge(session, discordClient);
-  logger.info(`Reattached session: ${session.name}`);
 }
 
-// Cases 2 & 3: Full resume with context injection
 export async function resumeSession(session: Session, discordClient: Client): Promise<ResumeResult> {
-  // 1. Read checkpoint from disk
-  const checkpoint = readCheckpoint(session);
+  return await restartSession(session, discordClient, 'resume');
+}
 
-  // 2. Fetch recent Discord messages (always — most up-to-date)
-  const discordMessages = await fetchRecentMessages(session.discordChannelId, discordClient);
-
-  // 3. Merge checkpoint context + Discord messages (deduplicate by timestamp proximity)
-  const checkpointMessages = checkpoint?.recentMessages ?? [];
-  const mergedMessages = mergeMessages(checkpointMessages, discordMessages);
-
-  // 4. Build resume prompt
-  const resumePrompt = buildResumePrompt(session, checkpoint, mergedMessages);
-
-  // 5. Kill old tmux session if somehow still there
-  if (tmuxSessionExists(session.tmuxSession)) {
-    killTmuxSession(session.tmuxSession);
-  }
-
-  // 6. Create new tmux session
-  createTmuxSession(session.tmuxSession, session.projectDir);
-
-  // 7. Write resume context to a file Claude can read
-  const resumePromptPath = path.join(session.projectDir, RESUME_PROMPT_FILENAME);
-  fs.writeFileSync(resumePromptPath, resumePrompt);
-
-  // 8. Spawn Claude Code with the resume file as the initial prompt
-  const cmd = buildClaudeCommand(session);
-  sendKeys(session.tmuxSession, cmd);
-
-  // Wait for Claude Code to be ready, then tell it to read the resume context
-  await waitForPrompt(session.tmuxSession, 30_000);
-  sendKeys(session.tmuxSession, `Read ${RESUME_PROMPT_FILENAME} and resume the session described in it. Acknowledge what you were working on.`);
-
-  // 9. Update session state and start bridge
-  incrementResumeCount(session.id);
-  updateSessionStatus(session.id, 'starting');
+export async function restartSession(
+  session: Session,
+  discordClient: Client,
+  reason: 'resume' | 'directory-access-update' = 'resume'
+): Promise<ResumeResult> {
+  await terminateSessionWorker(session);
+  updateSessionStatus(session.id, 'starting', null);
+  updateSessionRuntime(session.id, {
+    transportState: 'disconnected',
+    workerStatus: 'starting',
+  });
   startBridge(session, discordClient);
 
-  // 10. Post to Discord
-  try {
-    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
-    const updated = getSession(session.id);
-    const resumeNum = updated?.resumeCount ?? session.resumeCount + 1;
-    if (channel) {
-      await channel.send(`↺ Session **${session.name}** is resuming (resume #${resumeNum})...`);
+  if (reason === 'resume') {
+    incrementResumeCount(session.id);
+  }
+  const latestForCli = getSession(session.id) || session;
+  const cliResume = await spawnSessionWorker(latestForCli, { mode: 'resume' });
+  if (cliResume.ready) {
+    if (reason === 'resume') {
+      await postResumeNotice(discordClient, latestForCli, 'cli', reason);
     }
-  } catch (err: any) {
-    logger.error(`Failed to post resume notice for ${session.name}: ${err.message}`);
+    return {
+      session: getSession(session.id) || latestForCli,
+      checkpointUsed: false,
+      messagesInjected: 0,
+      resumePromptLength: 0,
+      resumeStrategy: 'cli',
+    };
   }
 
-  const updated = getSession(session.id)!;
+  await terminateSessionWorker(session);
+
+  const checkpoint = readCheckpoint(session);
+  const discordMessages = await fetchRecentMessages(session.discordChannelId, discordClient);
+  const mergedMessages = mergeMessages(checkpoint?.recentMessages ?? [], discordMessages);
+  const resumePrompt = buildResumePrompt(session, checkpoint, mergedMessages);
+  const resumePromptPath = getResumePromptPath(session.projectDir);
+  fs.writeFileSync(resumePromptPath, resumePrompt);
+
+  const latestForPrompt = getSession(session.id) || session;
+  const promptResume = await spawnSessionWorker(latestForPrompt, {
+    mode: 'resume-prompt',
+    resumePromptPath,
+  });
+
+  if (!promptResume.ready) {
+    markInterrupted(session.id);
+    throw new Error(promptResume.error || cliResume.error || 'Failed to resume session with Claude resume and checkpoint fallback');
+  }
+
+  if (reason === 'resume') {
+    await postResumeNotice(discordClient, latestForPrompt, 'checkpoint', reason);
+  }
   return {
-    session: updated,
+    session: getSession(session.id) || latestForPrompt,
     checkpointUsed: !!checkpoint,
     messagesInjected: mergedMessages.length,
     resumePromptLength: resumePrompt.length,
+    resumeStrategy: 'checkpoint',
   };
 }
 
-// Reconcile all DB sessions against live tmux sessions and Discord channels
-export async function reconcileOnStartup(
-  discordClient: Client
-): Promise<ReconciliationReport> {
+export async function reconcileOnStartup(discordClient: Client): Promise<ReconciliationReport> {
   const sessions = getAllSessions();
   const report: ReconciliationReport = {
     liveAndHealthy: [],
@@ -108,7 +110,6 @@ export async function reconcileOnStartup(
   };
 
   for (const session of sessions) {
-    // Check if Discord channel still exists
     let channelExists = false;
     try {
       const channel = await discordClient.channels.fetch(session.discordChannelId);
@@ -118,80 +119,37 @@ export async function reconcileOnStartup(
     }
 
     if (!channelExists) {
-      logger.info(`Session ${session.name}: Discord channel gone — cleaning up`);
       deleteSession(session.id);
       report.cleaned.push(session.name);
       continue;
     }
 
-    // Check tmux session
-    const tmuxAlive = tmuxSessionExists(session.tmuxSession);
-
-    if (tmuxAlive) {
-      const pid = getSessionPid(session.tmuxSession);
-      if (pid) {
-        // Case 1: Everything still running
-        if (session.status === 'active' || session.status === 'starting') {
-          report.liveAndHealthy.push(session.name);
-        } else {
-          // Was marked interrupted or dead but actually still running
-          report.reattached.push(session.name);
-        }
-        await reattachSession(session, discordClient);
+    const worker = getWorkerRuntime(session.id);
+    if (worker) {
+      if (session.status === 'active' || session.status === 'starting' || session.status === 'idle') {
+        report.liveAndHealthy.push(session.name);
       } else {
-        // tmux alive but no process — kill tmux, mark interrupted
-        killTmuxSession(session.tmuxSession);
-        markInterrupted(session.id);
-        report.interrupted.push(session.name);
+        report.reattached.push(session.name);
       }
-    } else {
-      // tmux session dead — Case 2 or 3
-      if (session.status !== 'dead' && session.status !== 'interrupted') {
-        markInterrupted(session.id);
-        report.interrupted.push(session.name);
-      } else if (session.status === 'interrupted') {
-        report.interrupted.push(session.name);
-      }
+      await reattachSession(session, discordClient);
+      continue;
+    }
+
+    if (session.status !== 'dead' && session.status !== 'interrupted') {
+      markInterrupted(session.id);
+      report.interrupted.push(session.name);
+    } else if (session.status === 'interrupted') {
+      report.interrupted.push(session.name);
     }
   }
 
-  // Post reconciliation summary if anything interesting happened
   if (report.reattached.length > 0 || report.interrupted.length > 0 || report.cleaned.length > 0) {
-    const orchName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
-    try {
-      const guild = discordClient.guilds.cache.first();
-      if (guild) {
-        const orchChannel = guild.channels.cache.find(
-          c => c.name === orchName && c.isTextBased()
-        ) as TextChannel | undefined;
-
-        if (orchChannel) {
-          const lines: string[] = ['**Reconciliation report:**'];
-          if (report.liveAndHealthy.length > 0) {
-            lines.push(`  Healthy: ${report.liveAndHealthy.join(', ')}`);
-          }
-          if (report.reattached.length > 0) {
-            lines.push(`  ↺ Reattached: ${report.reattached.join(', ')}`);
-          }
-          if (report.interrupted.length > 0) {
-            lines.push(`  ⚠ Interrupted (use \`/resume <name>\` to recover): ${report.interrupted.join(', ')}`);
-          }
-          if (report.cleaned.length > 0) {
-            lines.push(`  Cleaned up: ${report.cleaned.join(', ')}`);
-          }
-          await orchChannel.send(lines.join('\n'));
-        }
-      }
-    } catch (err: any) {
-      logger.error(`Failed to post reconciliation report: ${err.message}`);
-    }
+    await postReconciliationReport(report, discordClient);
   }
 
   logger.info('Reconciliation complete', report);
   return report;
 }
-
-// --- Internal helpers ---
 
 function buildResumePrompt(
   session: Session,
@@ -201,13 +159,13 @@ function buildResumePrompt(
   const now = Date.now();
   const interruptedAt = session.interruptedAt ?? checkpoint?.writtenAt ?? now;
   const minutesAgo = Math.round((now - interruptedAt) / 60_000);
-  const resumeNum = session.resumeCount + 1;
+  const resumeNum = getSession(session.id)?.resumeCount ?? (session.resumeCount + 1);
 
   const formattedMessages = messages
-    .map(m => `${m.author === 'claude' ? 'Claude' : 'User'}: ${m.content}`)
+    .map(msg => `${msg.author === 'claude' ? 'Claude' : 'User'}: ${msg.content}`)
     .join('\n');
 
-  return `[CONDUCTOR RESUME — Session: ${session.name} — Resume #${resumeNum}]
+  return `[CONDUCTOR RESUME - Session: ${session.name} - Resume #${resumeNum}]
 
 You are resuming a previous Claude Code session that was interrupted.
 Project directory: ${session.projectDir}
@@ -232,10 +190,7 @@ Do not repeat the resume context back verbatim.
 `;
 }
 
-async function fetchRecentMessages(
-  channelId: string,
-  client: Client
-): Promise<CheckpointMessage[]> {
+async function fetchRecentMessages(channelId: string, client: Client): Promise<CheckpointMessage[]> {
   const count = parseInt(process.env.CHECKPOINT_DISCORD_MESSAGES || '50', 10);
   try {
     const channel = await client.channels.fetch(channelId);
@@ -254,39 +209,64 @@ async function fetchRecentMessages(
   }
 }
 
-async function waitForPrompt(tmuxSession: string, timeoutMs: number): Promise<void> {
-  const { capturePaneOutput, sendEnter } = await import('./tmux.js');
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    const pane = capturePaneOutput(tmuxSession, 30);
-    // Auto-accept workspace trust prompt
-    if (pane.includes('Yes, I trust this folder') || pane.includes('Enter to confirm')) {
-      sendEnter(tmuxSession);
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      continue;
+function mergeMessages(checkpointMessages: CheckpointMessage[], discordMessages: CheckpointMessage[]): CheckpointMessage[] {
+  const merged = [...discordMessages];
+  for (const checkpointMessage of checkpointMessages) {
+    const duplicate = discordMessages.some(
+      discordMessage =>
+        Math.abs(discordMessage.timestamp - checkpointMessage.timestamp) < 2000 &&
+        discordMessage.author === checkpointMessage.author
+    );
+    if (!duplicate) {
+      merged.push(checkpointMessage);
     }
-    if (pane.includes('❯')) return;
+  }
+  return merged.sort((a, b) => a.timestamp - b.timestamp);
+}
+
+async function postResumeNotice(
+  discordClient: Client,
+  session: Session,
+  strategy: 'cli' | 'checkpoint',
+  reason: 'resume' | 'directory-access-update'
+): Promise<void> {
+  try {
+    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+    if (!channel) return;
+    const latest = getSession(session.id) || session;
+    const action = reason === 'directory-access-update'
+      ? 'is restarting to apply updated directory access'
+      : 'is resuming';
+    await channel.send(`↺ Session **${session.name}** ${action} (resume #${latest.resumeCount}) via **${strategy}**...`);
+  } catch (err: any) {
+    logger.error(`Failed to post resume notice for ${session.name}: ${err.message}`);
   }
 }
 
-function mergeMessages(
-  checkpointMsgs: CheckpointMessage[],
-  discordMsgs: CheckpointMessage[]
-): CheckpointMessage[] {
-  // Discord messages are the source of truth; checkpoint messages fill gaps
-  // Deduplicate by checking timestamp proximity (within 2 seconds)
-  const merged = [...discordMsgs];
-  const discordTimestamps = new Set(discordMsgs.map(m => m.timestamp));
+async function postReconciliationReport(report: ReconciliationReport, discordClient: Client): Promise<void> {
+  const orchestratorName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
+  try {
+    const guild = discordClient.guilds.cache.get(process.env.DISCORD_GUILD_ID!);
+    const channel = guild?.channels.cache.find(
+      entry => entry.name === orchestratorName && entry.isTextBased()
+    ) as TextChannel | undefined;
+    if (!channel) return;
 
-  for (const msg of checkpointMsgs) {
-    const isDuplicate = discordMsgs.some(
-      dm => Math.abs(dm.timestamp - msg.timestamp) < 2000 && dm.author === msg.author
-    );
-    if (!isDuplicate) {
-      merged.push(msg);
+    const lines: string[] = ['**Reconciliation report:**'];
+    if (report.liveAndHealthy.length > 0) {
+      lines.push(`Healthy: ${report.liveAndHealthy.join(', ')}`);
     }
+    if (report.reattached.length > 0) {
+      lines.push(`Reattached: ${report.reattached.join(', ')}`);
+    }
+    if (report.interrupted.length > 0) {
+      lines.push(`Interrupted (use \`${formatCommand('resume <name>')}\` to recover): ${report.interrupted.join(', ')}`);
+    }
+    if (report.cleaned.length > 0) {
+      lines.push(`Cleaned up: ${report.cleaned.join(', ')}`);
+    }
+    await channel.send(lines.join('\n'));
+  } catch (err: any) {
+    logger.error(`Failed to post reconciliation report: ${err.message}`);
   }
-
-  return merged.sort((a, b) => a.timestamp - b.timestamp);
 }

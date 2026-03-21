@@ -1,52 +1,52 @@
 # Configuration
 
-All configuration is via environment variables. Copy `.env.example` to `.env` and fill in the required values.
-
 ## Required
 
 | Variable | Description |
 |----------|-------------|
-| `DISCORD_BOT_TOKEN` | Bot token from the Discord Developer Portal |
-| `DISCORD_CLIENT_ID` | Application client ID from Discord |
-| `DISCORD_GUILD_ID` | Server (guild) ID where Conductor operates |
+| `DISCORD_BOT_TOKEN` | Discord bot token |
+| `DISCORD_CLIENT_ID` | Discord application client ID |
+| `DISCORD_GUILD_ID` | Discord guild ID Conductor manages |
 
-## Optional
+## Runtime
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ORCHESTRATOR_CHANNEL_NAME` | `orchestrator` | Name of the control channel where commands are issued |
-| `CONDUCTOR_API_PORT` | `7842` | Port for the Express REST API (localhost only) |
-| `DEFAULT_WORK_DIR` | `~/projects` | Base directory for session project directories. New sessions without an explicit dir get `<DEFAULT_WORK_DIR>/<session-name>` |
-| `MAX_SESSIONS` | `10` | Maximum number of concurrent active sessions |
-| `SESSION_IDLE_TIMEOUT_MINS` | `120` | Kill sessions idle longer than this (minutes). Set to `0` to disable |
-| `CHECKPOINT_INTERVAL_MINS` | `15` | How often to write checkpoints (minutes). Set to `0` to disable |
-| `CHECKPOINT_DISCORD_MESSAGES` | `50` | Number of recent Discord messages to include in checkpoints |
-| `AUTO_RESUME_ON_START` | `false` | Automatically resume interrupted sessions when Conductor starts |
-| `ARCHIVE_ON_KILL` | `true` | Archive killed session channels (`true`) or delete them (`false`) |
-| `CLAUDE_BIN` | `claude` | Path to the Claude Code binary. Use an absolute path if Claude isn't on `$PATH` |
-| `INDICATOR_MODE` | `typing` | Default typing indicator mode: `typing` (show "Conductor is typing...") or `off`. Can be overridden per-session with `/mode` |
+| `CONDUCTOR_API_PORT` | `7842` | Local daemon port |
+| `DEFAULT_WORK_DIR` | `~/projects` | Base working directory for new sessions |
+| `CLAUDE_BIN` | `claude` | Claude Code executable path |
+| `TERMINAL_BACKEND` | `pty` | `pty` is the supported backend, `tmux` is legacy only |
+| `STRUCTURED_TRANSPORT` | `channel` | `channel` enables the generated Claude channel server, `off` disables it |
+| `SESSION_RECONNECT_GRACE_MS` | `15000` | How long startup waits for live workers to reconnect before reconciliation |
 
-## Discord Bot Setup
+## Session Limits
 
-The bot requires these intents enabled in the Discord Developer Portal:
-- **Server Members Intent** — not required
-- **Message Content Intent** — required (for reading command and session messages)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_SESSIONS` | `10` | Max concurrent active sessions |
+| `SESSION_IDLE_TIMEOUT_MINS` | `120` | Idle timeout, `0` disables |
+| `AUTO_RESUME_ON_START` | `false` | Automatically resume interrupted sessions on daemon startup |
+| `ARCHIVE_ON_KILL` | `true` | Archive killed channels instead of deleting them |
 
-Required bot permissions:
-- Manage Channels (create/rename/delete/move session channels)
-- Send Messages
-- Read Message History
-- Add Reactions
+## Checkpoints
 
-## Database
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHECKPOINT_INTERVAL_MINS` | `15` | Periodic checkpoint cadence, `0` disables |
+| `CHECKPOINT_DISCORD_MESSAGES` | `50` | Number of recent Discord messages to capture |
 
-SQLite database is stored at `data/conductor.db` relative to the project root. Created automatically on first run. Uses WAL journal mode for concurrent read performance.
+## UX
 
-## Logging
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCHESTRATOR_CHANNEL_NAME` | `orchestrator` | Control-plane channel name |
+| `COMMAND_PREFIX` | `/` | Prefix for text commands in the orchestrator channel and session-channel `mode` commands |
+| `INDICATOR_MODE` | `typing` | Global typing indicator mode |
 
-Logs go to stdout in the format:
-```
-[2025-03-10 14:30:00] [INFO] Conductor starting...
-```
+## Notes
 
-Log levels: `DEBUG`, `INFO`, `WARN`, `ERROR`. No configuration for log level filtering — all levels are output.
+- The supported path uses a generated Node MCP server with Claude’s development-channel flag.
+- `tmux` and Bun are optional only. They are not required for the supported runtime.
+- `COMMAND_PREFIX` must not contain whitespace. Invalid values fall back to `/`.
+- Conductor validates `CLAUDE_BIN` at startup and requires Claude Code `2.1.80+`.
+- Legacy databases with `sessions.tmux_session NOT NULL` must be reset manually by deleting `data/conductor.db`, `data/conductor.db-shm`, and `data/conductor.db-wal`.

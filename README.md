@@ -1,80 +1,84 @@
-# Conductor — Claude Code Session Orchestrator
+# Conductor
 
-A self-hosted system that turns a Discord server into a multi-session Claude Code hub. Post a command in a control channel, and Conductor spawns a Claude Code session on your server, creates a matching Discord channel, and bridges them — so the Discord channel becomes a live two-way terminal to that Claude Code session.
+Conductor turns a Discord server into a multi-session Claude Code control plane. Each session gets its own Discord channel, a detached worker process, a persistent Claude Code session, and a structured Discord transport through Claude Channels.
 
-## Prerequisites
+## Supported Runtime
 
-- **Node.js 20+**
-- **tmux** (installed and on PATH)
-- **Claude Code v2.1.80+** (authenticated — run `claude` once manually first)
-- A **Discord bot** with the correct permissions and intents (see below)
+- Node.js 20+
+- Claude Code v2.1.80+
+- `claude.ai` authentication for Claude Code
+- Discord bot with message content intent enabled
 
-## Discord Bot Setup
+The supported path is:
 
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application and add a Bot
-3. Enable these **Privileged Gateway Intents**:
-   - Message Content Intent
-4. Bot permissions required:
-   - Manage Channels
-   - Manage Messages
-   - Read Messages / View Channels
-   - Send Messages
-   - Embed Links
-   - Attach Files
-5. Invite the bot to your server with an OAuth2 URL using the `bot` scope and the permissions above
+- Claude Code CLI
+- detached session workers
+- `node-pty` for the terminal backend
+- a custom Node MCP channel server for Discord transport
 
-## Installation
+`tmux` is legacy and optional. Bun is optional and not required for the supported path.
+
+## Install
 
 ```bash
 git clone <repo-url> conductor
 cd conductor
 npm install
 cp .env.example .env
-# Edit .env with your Discord bot token, client ID, and guild ID
 ```
 
-## Running
+Fill in `DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID`, then make sure Claude Code is already authenticated:
 
-**Development:**
+```bash
+claude
+```
+
+If `/` is already reserved by another bot in your server, set `COMMAND_PREFIX` in `.env` to something else such as `!` or `cc!`.
+
+## Run
+
+Development:
+
 ```bash
 npm run dev
 ```
 
-**Production (systemd — Linux):**
-```bash
-# Edit scripts/conductor.service paths as needed
-sudo cp scripts/conductor.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now conductor
-```
+Production:
 
-**Production (launchd — macOS):**
-```bash
-# Edit scripts/com.conductor.plist paths as needed
-cp scripts/com.conductor.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.conductor.plist
-```
+- macOS: `scripts/com.conductor.plist`
+- Linux: `scripts/conductor.service`
 
-## Command Reference
+See [SETUP.md](/mnt/d/Repositories/cc-conductor/SETUP.md) and [docs/deployment.md](/mnt/d/Repositories/cc-conductor/docs/deployment.md).
 
-All commands are typed in the `#orchestrator` channel:
+## Upgrade Notes
+
+- Conductor now fails fast if `CLAUDE_BIN` resolves to Claude Code older than `2.1.80`.
+- If you are upgrading from the legacy tmux-backed DB schema and startup reports `sessions.tmux_session` is still `NOT NULL`, delete `data/conductor.db`, `data/conductor.db-shm`, and `data/conductor.db-wal`, then restart.
+
+## Commands
+
+All commands are issued in the channel named by `ORCHESTRATOR_CHANNEL_NAME` (default `#orchestrator`).
+
+Set `COMMAND_PREFIX` to change the control-plane prefix. The examples below use `<prefix>` as a placeholder; with the default config, `<prefix>` is `/`.
 
 | Command | Description |
 |---------|-------------|
-| `/new <name> [dir]` | Start a new Claude Code session. Creates a Discord channel and tmux session. |
-| `/list` | List all sessions with status indicators. |
-| `/kill <name>` | Kill a session (with confirmation button). |
-| `/resume [name]` | Resume an interrupted session, or list resumable sessions. |
-| `/mode default <off\|typing>` | Set global typing indicator mode. |
-| `/mode <session> <off\|typing\|reset>` | Set per-session typing indicator. |
-| `/help` | Show command reference. |
+| `<prefix>new <name> [dir]` | Start a new Claude Code session and create a matching Discord channel |
+| `<prefix>list` | List sessions and statuses |
+| `<prefix>kill <name>` | Kill a session |
+| `<prefix>resume [name]` | Resume an interrupted session |
+| `<prefix>add-dir <session> <path>` | Allow an extra directory for a session and restart it to apply access |
+| `<prefix>mode default <off\|typing>` | Set the global typing indicator mode |
+| `<prefix>mode <session> <off\|typing\|reset>` | Set per-session typing indicator |
+| `<prefix>help` | Show command reference |
 
 ## Architecture
 
-Conductor is a Node.js daemon that manages Claude Code sessions via tmux. The Discord bot handles the control plane (spawning, listing, killing sessions), while a terminal bridge polls tmux panes for the data plane (relaying Discord messages to/from each Claude Code session). Session state is persisted in SQLite, and periodic checkpoints capture git state and conversation history to enable session resumability across process crashes and system reboots.
+Conductor now has three runtime roles:
 
-## Environment Variables
+- The main daemon owns the Discord bot, REST API, DB, routing, reconciliation, and health monitoring.
+- Each session runs in a detached worker that owns the persistent Claude Code process.
+- Claude replies travel through a custom Node channel server over Claude Channels instead of terminal pane scraping.
 
 Copy `.env.example` to `.env` and fill in the required values:
 
@@ -100,14 +104,15 @@ INDICATOR_MODE=typing
 
 ## Session Resumability
 
-Conductor handles three failure modes:
+Conductor handles three recovery paths:
 
-1. **Conductor crash** (server still up): tmux sessions survive. On restart, Conductor reconciles its DB against live tmux sessions and re-attaches.
-2. **Claude Code crash** (Conductor still up): The health monitor detects the dead process and marks the session as interrupted. Use `/resume <name>` to restart with context from the checkpoint file and Discord history.
-3. **Full system restart**: All tmux sessions are gone. On startup, Conductor detects interrupted sessions and notifies in each channel. Use `/resume <name>` to reconstruct with injected context.
+1. Daemon restart: workers keep running and reconnect to the restarted daemon.
+2. Worker or Claude exit: the session is marked interrupted and can be resumed.
+3. Full machine restart: `<prefix>resume` first attempts Claude CLI resume, then falls back to Conductor checkpoint injection.
 
-## Known Limitations
+## Notes
 
-- **Single guild:** Conductor manages one Discord server only, set by `DISCORD_GUILD_ID`.
-- **Claude Code auth:** Claude Code must be pre-authenticated on the server. Conductor does not handle login.
-- **No inbound ports:** The daemon listens on localhost only.
+- The supported structured transport currently depends on Claude Channels research-preview behavior and the development channel flag.
+- Conductor keeps a single Discord gateway client in the daemon. Session workers and channel servers talk back to it over localhost-authenticated internal routes.
+- Core runtime code is backend-neutral; platform-specific deployment remains outside the runtime.
+- Worker startup diagnostics are written under `data/sessions/<sessionId>/`.

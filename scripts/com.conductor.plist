@@ -12,7 +12,7 @@
         <string>src/index.ts</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/matthewday/dev/cc-conductor</string>
+    <string>/opt/conductor</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

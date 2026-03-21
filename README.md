@@ -7,7 +7,6 @@ A self-hosted system that turns a Discord server into a multi-session Claude Cod
 - **Node.js 20+**
 - **tmux** (installed and on PATH)
 - **Claude Code v2.1.80+** (authenticated — run `claude` once manually first)
-- **Bun** (for the channels plugin)
 - A **Discord bot** with the correct permissions and intents (see below)
 
 ## Discord Bot Setup
@@ -31,7 +30,6 @@ A self-hosted system that turns a Discord server into a multi-session Claude Cod
 git clone <repo-url> conductor
 cd conductor
 npm install
-cd plugin/discord-autopair && npm install && cd ../..
 cp .env.example .env
 # Edit .env with your Discord bot token, client ID, and guild ID
 ```
@@ -68,11 +66,13 @@ All commands are typed in the `#orchestrator` channel:
 | `/list` | List all sessions with status indicators. |
 | `/kill <name>` | Kill a session (with confirmation button). |
 | `/resume [name]` | Resume an interrupted session, or list resumable sessions. |
+| `/mode default <off\|typing>` | Set global typing indicator mode. |
+| `/mode <session> <off\|typing\|reset>` | Set per-session typing indicator. |
 | `/help` | Show command reference. |
 
 ## Architecture
 
-Conductor is a Node.js daemon that manages Claude Code sessions via tmux. The Discord bot handles the control plane (spawning, listing, killing sessions), while a forked Claude Code channels plugin handles the data plane (bridging Discord messages to/from each Claude Code session). Session state is persisted in SQLite, and periodic checkpoints capture git state and conversation history to enable session resumability across process crashes and system reboots.
+Conductor is a Node.js daemon that manages Claude Code sessions via tmux. The Discord bot handles the control plane (spawning, listing, killing sessions), while a terminal bridge polls tmux panes for the data plane (relaying Discord messages to/from each Claude Code session). Session state is persisted in SQLite, and periodic checkpoints capture git state and conversation history to enable session resumability across process crashes and system reboots.
 
 ## Environment Variables
 
@@ -88,8 +88,6 @@ Conductor handles three failure modes:
 
 ## Known Limitations
 
-- **Research preview:** The `--dangerously-load-development-channels` flag is required for the custom plugin. This is a Claude Code research preview feature.
 - **Single guild:** Conductor manages one Discord server only, set by `DISCORD_GUILD_ID`.
 - **Claude Code auth:** Claude Code must be pre-authenticated on the server. Conductor does not handle login.
-- **No inbound ports:** The daemon listens on localhost only. The plugin communicates with Discord via outbound API calls.
-- **Bun required:** The channels plugin runs under Bun (Claude Code plugin format requirement). The main process uses Node.js.
+- **No inbound ports:** The daemon listens on localhost only.

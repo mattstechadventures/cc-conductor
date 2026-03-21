@@ -13,7 +13,6 @@ Install the following before proceeding:
 | Node.js | 20.0.0 | `node -v` | `brew install node` | [nodesource](https://github.com/nodesource/distributions) |
 | tmux | any | `tmux -V` | `brew install tmux` | `apt install tmux` / `dnf install tmux` |
 | Claude Code | v2.1.80+ | `claude --version` | `npm install -g @anthropic-ai/claude-code` | same |
-| Bun | any | `bun -v` | `brew install oven-sh/bun/bun` | `curl -fsSL https://bun.sh/install \| bash` |
 
 ### Claude Code Authentication
 
@@ -76,9 +75,6 @@ cd conductor
 
 # Install Node.js dependencies
 npm install
-
-# Install MCP plugin dependencies (optional, backup bridge)
-cd plugin/discord-autopair && npm install && cd ../..
 ```
 
 ---
@@ -133,6 +129,9 @@ AUTO_RESUME_ON_START=false
 
 # Move killed session channels to Archive category vs delete (default: true)
 ARCHIVE_ON_KILL=true
+
+# Typing indicator mode: 'typing' or 'off' (default: typing)
+INDICATOR_MODE=typing
 ```
 
 ---
@@ -149,7 +148,7 @@ The `data/` directory (for SQLite) is created automatically on first run.
 
 ---
 
-## 7. Run Conductor
+## 6. Run Conductor
 
 ### Development (foreground, with logs)
 
@@ -210,7 +209,7 @@ journalctl -u conductor -f
 
 ---
 
-## 8. Verify It Works
+## 7. Verify It Works
 
 1. Open your Discord server
 2. You should see a new **Conductor** category with a `#orchestrator` channel
@@ -241,13 +240,12 @@ journalctl -u conductor -f
 
 If you're Claude Code setting this up for a user, run through these steps:
 
-1. **Check prerequisites**: `node -v`, `tmux -V`, `claude --version`, `bun -v`
+1. **Check prerequisites**: `node -v`, `tmux -V`, `claude --version`
 2. **Install missing deps**: Use brew (macOS) or apt/dnf (Linux)
 3. **Run `npm install`** in the project root
-4. **Run `npm install`** in `plugin/discord-autopair/`
-5. **Copy `.env.example` to `.env`** if `.env` doesn't exist
-6. **Ask the user** for `DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID` — these cannot be guessed
-7. **Set `CLAUDE_BIN`** in `.env` if `claude` isn't on PATH (use output of `which claude`)
-8. **Create `DEFAULT_WORK_DIR`** (`mkdir -p ~/projects`)
-9. **Run `npm run dev`** to verify startup
-10. **Check Discord** for the `#orchestrator` channel and test `/help`
+4. **Copy `.env.example` to `.env`** if `.env` doesn't exist
+5. **Ask the user** for `DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID` — these cannot be guessed
+6. **Set `CLAUDE_BIN`** in `.env` if `claude` isn't on PATH (use output of `which claude`)
+7. **Create `DEFAULT_WORK_DIR`** (`mkdir -p ~/projects`)
+8. **Run `npm run dev`** to verify startup
+9. **Check Discord** for the `#orchestrator` channel and test `/help`

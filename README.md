@@ -76,7 +76,27 @@ Conductor is a Node.js daemon that manages Claude Code sessions via tmux. The Di
 
 ## Environment Variables
 
-See `.env.example` for all configuration options.
+Copy `.env.example` to `.env` and fill in the required values:
+
+```env
+# Required — from Discord Developer Portal
+DISCORD_BOT_TOKEN=           # Bot tab → Token
+DISCORD_CLIENT_ID=           # OAuth2 tab → Client ID
+DISCORD_GUILD_ID=            # Right-click server → Copy Server ID
+
+# Optional — sensible defaults
+ORCHESTRATOR_CHANNEL_NAME=orchestrator
+CONDUCTOR_API_PORT=7842
+DEFAULT_WORK_DIR=~/projects
+MAX_SESSIONS=10
+SESSION_IDLE_TIMEOUT_MINS=120
+CHECKPOINT_INTERVAL_MINS=15
+CHECKPOINT_DISCORD_MESSAGES=50
+AUTO_RESUME_ON_START=false
+ARCHIVE_ON_KILL=true
+CLAUDE_BIN=claude
+INDICATOR_MODE=typing
+```
 
 ## Session Resumability
 

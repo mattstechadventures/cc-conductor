@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { Session, SessionStatus } from './types.js';
+import type { Session, SessionStatus, IndicatorMode } from './types.js';
 import { logger } from './logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +53,7 @@ function runMigrations(): void {
     checkpoint_path: 'TEXT',
     resume_count: 'INTEGER',
     interrupted_at: 'INTEGER',
+    indicator_mode: 'TEXT',
   };
 
   const existingColumns = new Set(
@@ -85,6 +86,7 @@ function rowToSession(row: any): Session {
     checkpointPath: row.checkpoint_path ?? null,
     resumeCount: row.resume_count ?? 0,
     interruptedAt: row.interrupted_at ?? null,
+    indicatorMode: (row.indicator_mode as IndicatorMode) ?? null,
   };
 }
 
@@ -93,11 +95,13 @@ export function createSession(session: Session): void {
     INSERT INTO sessions (
       id, name, discord_channel_id, discord_channel_name, tmux_session,
       project_dir, pid, status, created_at, last_active_at,
-      last_checkpoint_at, checkpoint_path, resume_count, interrupted_at
+      last_checkpoint_at, checkpoint_path, resume_count, interrupted_at,
+      indicator_mode
     ) VALUES (
       @id, @name, @discordChannelId, @discordChannelName, @tmuxSession,
       @projectDir, @pid, @status, @createdAt, @lastActiveAt,
-      @lastCheckpointAt, @checkpointPath, @resumeCount, @interruptedAt
+      @lastCheckpointAt, @checkpointPath, @resumeCount, @interruptedAt,
+      @indicatorMode
     )
   `).run({
     id: session.id,
@@ -114,6 +118,7 @@ export function createSession(session: Session): void {
     checkpointPath: session.checkpointPath,
     resumeCount: session.resumeCount,
     interruptedAt: session.interruptedAt,
+    indicatorMode: session.indicatorMode,
   });
 }
 
@@ -172,6 +177,10 @@ export function markInterrupted(id: string): void {
 
 export function incrementResumeCount(id: string): void {
   db.prepare('UPDATE sessions SET resume_count = resume_count + 1 WHERE id = ?').run(id);
+}
+
+export function updateSessionIndicatorMode(id: string, mode: IndicatorMode | null): void {
+  db.prepare('UPDATE sessions SET indicator_mode = ? WHERE id = ?').run(mode, id);
 }
 
 export function deleteSession(id: string): void {

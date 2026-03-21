@@ -1,4 +1,5 @@
 export type SessionStatus = 'starting' | 'active' | 'idle' | 'interrupted' | 'dead';
+export type IndicatorMode = 'off' | 'typing';
 
 export interface Session {
   id: string;
@@ -15,6 +16,7 @@ export interface Session {
   checkpointPath: string | null;
   resumeCount: number;
   interruptedAt: number | null;
+  indicatorMode: IndicatorMode | null;
 }
 
 export interface Checkpoint {

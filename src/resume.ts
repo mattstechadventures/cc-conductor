@@ -11,6 +11,7 @@ import {
 } from './tmux.js';
 import { readCheckpoint } from './checkpoint.js';
 import { buildClaudeCommand } from './pairing.js';
+import { startBridge } from './bridge.js';
 import { logger } from './logger.js';
 
 const RESUME_PROMPT_FILENAME = '.conductor-resume-prompt.md';
@@ -29,6 +30,7 @@ export async function reattachSession(session: Session, discordClient: Client): 
   }
 
   updateSessionStatus(session.id, 'active', getSessionPid(session.tmuxSession) ?? undefined);
+  startBridge(session, discordClient);
   logger.info(`Reattached session: ${session.name}`);
 }
 
@@ -67,9 +69,10 @@ export async function resumeSession(session: Session, discordClient: Client): Pr
   await waitForPrompt(session.tmuxSession, 30_000);
   sendKeys(session.tmuxSession, `Read ${RESUME_PROMPT_FILENAME} and resume the session described in it. Acknowledge what you were working on.`);
 
-  // 9. Update session state
+  // 9. Update session state and start bridge
   incrementResumeCount(session.id);
   updateSessionStatus(session.id, 'starting');
+  startBridge(session, discordClient);
 
   // 10. Post to Discord
   try {

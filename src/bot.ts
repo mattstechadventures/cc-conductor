@@ -4,8 +4,9 @@ import {
   ComponentType,
 } from 'discord.js';
 import type { Session, DaemonResponse, ResumeResult } from './types.js';
-import { getSessionByChannelId, getSessionByName, getInterruptedSessions } from './sessions.js';
-import { sendToSession } from './bridge.js';
+import { getSessionByChannelId, getSessionByName, getInterruptedSessions, updateSessionIndicatorMode } from './sessions.js';
+import { sendToSession, getGlobalIndicatorMode, setGlobalIndicatorMode } from './bridge.js';
+import type { IndicatorMode } from './types.js';
 import { logger } from './logger.js';
 
 const API_BASE = () => `http://localhost:${process.env.CONDUCTOR_API_PORT || '7842'}`;
@@ -79,10 +80,18 @@ export async function setupBot(client: Client): Promise<void> {
       return;
     }
 
-    // Check if this is a session channel — relay to Claude Code
+    // Check if this is a session channel
     const session = getSessionByChannelId(message.channel.id);
-    if (session && (session.status === 'active' || session.status === 'starting')) {
-      sendToSession(session, message.content);
+    if (session) {
+      // Intercept /mode command in session channels
+      if (message.content.trim().startsWith('/mode')) {
+        await handleSessionMode(message, session);
+        return;
+      }
+      // Relay to Claude Code
+      if (session.status === 'active' || session.status === 'starting') {
+        sendToSession(session, message.content, client);
+      }
     }
   });
 }
@@ -107,6 +116,9 @@ async function handleOrchestratorCommand(message: any): Promise<void> {
         break;
       case '/resume':
         await handleResume(message, parts.slice(1));
+        break;
+      case '/mode':
+        await handleMode(message, parts.slice(1));
         break;
       case '/help':
         await handleHelp(message);
@@ -320,6 +332,64 @@ async function handleResume(message: any, args: string[]): Promise<void> {
   }
 }
 
+async function handleMode(message: any, args: string[]): Promise<void> {
+  if (args.length < 1) {
+    await message.reply(`Current global indicator mode: **${getGlobalIndicatorMode()}**\nUsage: \`/mode default <off|typing>\` or \`/mode <session> <off|typing|reset>\``);
+    return;
+  }
+
+  if (args[0] === 'default') {
+    const mode = args[1] as IndicatorMode;
+    if (mode !== 'off' && mode !== 'typing') {
+      await message.reply('Usage: `/mode default <off|typing>`');
+      return;
+    }
+    setGlobalIndicatorMode(mode);
+    await message.reply(`✓ Global indicator mode set to **${mode}**`);
+    return;
+  }
+
+  // Per-session: /mode <session> <off|typing|reset>
+  const sessionName = args[0];
+  const mode = args[1];
+  const session = getSessionByName(sessionName);
+  if (!session) {
+    await message.reply(`Session "${sessionName}" not found.`);
+    return;
+  }
+
+  if (mode === 'reset') {
+    updateSessionIndicatorMode(session.id, null);
+    await message.reply(`✓ Session **${sessionName}** indicator mode reset to global default (**${getGlobalIndicatorMode()}**)`);
+  } else if (mode === 'off' || mode === 'typing') {
+    updateSessionIndicatorMode(session.id, mode);
+    await message.reply(`✓ Session **${sessionName}** indicator mode set to **${mode}**`);
+  } else {
+    await message.reply('Usage: `/mode <session> <off|typing|reset>`');
+  }
+}
+
+async function handleSessionMode(message: any, session: Session): Promise<void> {
+  const parts = message.content.trim().split(/\s+/);
+  const mode = parts[1];
+
+  if (!mode) {
+    const current = session.indicatorMode || `inherited (${getGlobalIndicatorMode()})`;
+    await message.reply(`Indicator mode: **${current}**\nUsage: \`/mode <off|typing|reset>\``);
+    return;
+  }
+
+  if (mode === 'reset') {
+    updateSessionIndicatorMode(session.id, null);
+    await message.reply(`✓ Indicator mode reset to global default (**${getGlobalIndicatorMode()}**)`);
+  } else if (mode === 'off' || mode === 'typing') {
+    updateSessionIndicatorMode(session.id, mode);
+    await message.reply(`✓ Indicator mode set to **${mode}**`);
+  } else {
+    await message.reply('Usage: `/mode <off|typing|reset>`');
+  }
+}
+
 async function handleHelp(message: any): Promise<void> {
   const embed = new EmbedBuilder()
     .setTitle('Conductor Commands')
@@ -329,6 +399,8 @@ async function handleHelp(message: any): Promise<void> {
       { name: '/list', value: 'List all sessions with status.', inline: false },
       { name: '/kill <name>', value: 'Kill a session (with confirmation).', inline: false },
       { name: '/resume [name]', value: 'Resume an interrupted session, or list interrupted sessions.', inline: false },
+      { name: '/mode default <off|typing>', value: 'Set the global typing indicator mode.', inline: false },
+      { name: '/mode <session> <off|typing|reset>', value: 'Set per-session typing indicator (reset = inherit global).', inline: false },
       { name: '/help', value: 'Show this help.', inline: false },
     );
 

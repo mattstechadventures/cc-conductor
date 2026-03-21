@@ -7,9 +7,9 @@
 
 import { Client, TextChannel } from 'discord.js';
 import { sendKeys, capturePaneOutput, tmuxSessionExists } from './tmux.js';
-import { updateSessionActivity } from './sessions.js';
+import { updateSessionActivity, getSession } from './sessions.js';
 import { logger } from './logger.js';
-import type { Session } from './types.js';
+import type { Session, IndicatorMode } from './types.js';
 
 interface BridgeState {
   session: Session;
@@ -24,10 +24,33 @@ interface BridgeState {
   lastPaneHash: string;
   /** Whether we've already seen partial output (Claude started responding) */
   sawOutput: boolean;
+  /** Interval timer for sending Discord typing indicators */
+  typingTimer: ReturnType<typeof setInterval> | null;
 }
 
 const bridges = new Map<string, BridgeState>();
 const POLL_MS = 1500;
+const TYPING_INTERVAL_MS = 8_000;
+
+let globalIndicatorMode: IndicatorMode = 'typing';
+
+export function getGlobalIndicatorMode(): IndicatorMode {
+  return globalIndicatorMode;
+}
+
+export function setGlobalIndicatorMode(mode: IndicatorMode): void {
+  globalIndicatorMode = mode;
+}
+
+function getIndicatorMode(session: Session): IndicatorMode {
+  // Fresh read from DB
+  const fresh = getSession(session.id);
+  if (fresh?.indicatorMode) return fresh.indicatorMode;
+  if (globalIndicatorMode) return globalIndicatorMode;
+  const env = process.env.INDICATOR_MODE as IndicatorMode | undefined;
+  if (env === 'off' || env === 'typing') return env;
+  return 'typing';
+}
 /** After this many stable polls while Claude is done, flush */
 const STABLE_THRESHOLD = 2;
 
@@ -42,6 +65,7 @@ export function startBridge(session: Session, discordClient: Client): void {
     stableTicks: 0,
     lastPaneHash: '',
     sawOutput: false,
+    typingTimer: null,
   };
 
   state.pollTimer = setInterval(() => {
@@ -58,6 +82,7 @@ export function stopBridge(sessionId: string): void {
   const state = bridges.get(sessionId);
   if (!state) return;
   if (state.pollTimer) clearInterval(state.pollTimer);
+  if (state.typingTimer) clearInterval(state.typingTimer);
   bridges.delete(sessionId);
   logger.info(`Bridge stopped for session ${state.session.name}`);
 }
@@ -66,7 +91,7 @@ export function stopAllBridges(): void {
   for (const [id] of bridges) stopBridge(id);
 }
 
-export function sendToSession(session: Session, message: string): void {
+export function sendToSession(session: Session, message: string, discordClient?: Client): void {
   if (!tmuxSessionExists(session.tmuxSession)) {
     logger.warn(`Cannot send to ${session.name}: tmux session gone`);
     return;
@@ -79,11 +104,40 @@ export function sendToSession(session: Session, message: string): void {
     state.stableTicks = 0;
     state.lastPaneHash = '';
     state.sawOutput = false;
+    startTypingIndicator(state, discordClient || null);
   }
 
   sendKeys(session.tmuxSession, message);
   updateSessionActivity(session.id);
   logger.info(`Bridge sent to ${session.name}: ${message.substring(0, 60)}`);
+}
+
+// ── typing indicator ──
+
+function startTypingIndicator(state: BridgeState, discordClient: Client | null): void {
+  stopTypingIndicator(state);
+  if (!discordClient) return;
+  if (getIndicatorMode(state.session) !== 'typing') return;
+
+  const send = async () => {
+    try {
+      const channel = await discordClient.channels.fetch(state.session.discordChannelId) as TextChannel | null;
+      if (channel) await channel.sendTyping();
+    } catch {
+      // best effort
+    }
+  };
+
+  // Fire immediately, then repeat
+  send();
+  state.typingTimer = setInterval(send, TYPING_INTERVAL_MS);
+}
+
+function stopTypingIndicator(state: BridgeState): void {
+  if (state.typingTimer) {
+    clearInterval(state.typingTimer);
+    state.typingTimer = null;
+  }
 }
 
 // ── internal ──
@@ -194,6 +248,7 @@ function extractResponse(pane: string, sentMessage: string): string | null {
 }
 
 async function flushResponse(state: BridgeState, response: string, discordClient: Client): Promise<void> {
+  stopTypingIndicator(state);
   state.waitingForResponse = false;
   state.stableTicks = 0;
 

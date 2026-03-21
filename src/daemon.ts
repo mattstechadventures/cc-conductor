@@ -98,6 +98,7 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         checkpointPath: null,
         resumeCount: 0,
         interruptedAt: null,
+        indicatorMode: null,
       };
       createSession(session);
 

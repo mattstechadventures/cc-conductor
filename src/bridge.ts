@@ -156,8 +156,11 @@ function extractResponse(pane: string, sentMessage: string): string | null {
     // Skip the input line itself (may wrap)
     if (!started && trimmed === sentMessage.substring(50).trim()) continue;
 
-    // Start collecting after we see Claude's output marker (⏺)
-    if (!started && trimmed.startsWith('⏺')) {
+    // Start collecting after we see Claude's output marker.
+    // Different Claude Code versions use different bullet characters:
+    //   ⏺ (U+23FA), ● (U+25CF), ⏵ (U+23F5), ○ (U+25CB), • (U+2022)
+    const OUTPUT_MARKERS = ['⏺', '●', '⏵', '○', '•'];
+    if (!started && OUTPUT_MARKERS.some(m => trimmed.startsWith(m))) {
       started = true;
     }
 

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.conductor</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>--import</string>
+        <string>tsx</string>
+        <string>src/index.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/matthewday/dev/cc-conductor</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/conductor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/conductor-error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE_ENV</key>
+        <string>production</string>
+    </dict>
+</dict>
+</plist>

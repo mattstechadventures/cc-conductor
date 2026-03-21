@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "discord-autopair": {
+      "command": "bun",
+      "args": ["./server.ts"]
+    }
+  }
+}

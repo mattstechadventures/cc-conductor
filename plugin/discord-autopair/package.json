@@ -1,0 +1,11 @@
+{
+  "name": "discord-autopair",
+  "version": "0.1.0",
+  "description": "Auto-pairing Discord channel plugin for Claude Code (Conductor)",
+  "type": "module",
+  "main": "server.ts",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "discord.js": "^14.16.3"
+  }
+}

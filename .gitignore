@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/conductor.db
+data/conductor.db-shm
+data/conductor.db-wal
+.env
+*.log
+plugin/discord-autopair/node_modules/

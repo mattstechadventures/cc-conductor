@@ -1,0 +1,30 @@
+{
+  "name": "cc-conductor",
+  "version": "0.1.0",
+  "description": "Claude Code session orchestrator for Discord",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "node --import tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.1",
+    "nanoid": "^5.0.9"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

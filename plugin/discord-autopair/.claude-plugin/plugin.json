@@ -1,0 +1,9 @@
+{
+  "name": "discord-autopair",
+  "version": "0.1.0",
+  "description": "Auto-pairing Discord channel bridge for Conductor",
+  "author": {
+    "name": "Conductor"
+  },
+  "license": "MIT"
+}

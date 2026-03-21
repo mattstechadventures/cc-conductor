@@ -1,0 +1,26 @@
+[Unit]
+Description=Conductor — Claude Code Session Orchestrator
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/conductor
+ExecStart=/usr/bin/node --import tsx src/index.ts
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/conductor/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=conductor
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/conductor/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 import type { Session } from './types.js';
 
-const CLAUDE_BIN = '/Users/matthewday/.local/bin/claude';
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 
 /**
  * Build the claude command for a session.

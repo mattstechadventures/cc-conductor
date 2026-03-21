@@ -1,251 +1,168 @@
-# Conductor — Setup Guide
+# Conductor Setup
 
-This guide walks through setting up Conductor from scratch. It's written so that either a human or Claude Code can follow it step-by-step.
+## Visual Overview
 
----
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    A[Prerequisites] --> B[Discord Bot Setup]
+    B --> C[Install Repo]
+    C --> D[Configure .env]
+    D --> E[Run Daemon]
+    E --> F[Verify in Discord]
+    F --> G[Production Service]
+    F --> H[Troubleshoot]
 
-## 1. System Prerequisites
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef storage fill:#FFF7E6,stroke:#D97706,color:#7C2D12,stroke-width:1.5px;
+    classDef warning fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px;
 
-Install the following before proceeding:
-
-| Dependency | Minimum Version | Check Command | Install (macOS) | Install (Linux) |
-|------------|----------------|---------------|-----------------|-----------------|
-| Node.js | 20.0.0 | `node -v` | `brew install node` | [nodesource](https://github.com/nodesource/distributions) |
-| tmux | any | `tmux -V` | `brew install tmux` | `apt install tmux` / `dnf install tmux` |
-| Claude Code | v2.1.80+ | `claude --version` | `npm install -g @anthropic-ai/claude-code` | same |
-
-### Claude Code Authentication
-
-Claude Code must be authenticated before Conductor can use it. Run `claude` once manually in a terminal, complete the login flow, and verify it reaches a working prompt. Conductor does not handle authentication.
-
----
-
-## 2. Discord Bot Setup
-
-### 2a. Create the Application
-
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click **New Application**, give it a name (e.g. "Conductor")
-3. Go to the **Bot** tab and click **Add Bot**
-4. Copy the **Bot Token** — you'll need this for `.env`
-
-### 2b. Enable Intents
-
-On the **Bot** tab, scroll to **Privileged Gateway Intents** and enable:
-
-- [x] **Message Content Intent**
-
-### 2c. Set Permissions
-
-The bot needs these permissions:
-
-- Manage Channels
-- Manage Messages
-- Read Messages / View Channels
-- Send Messages
-- Embed Links
-- Attach Files
-
-### 2d. Invite the Bot
-
-1. Go to the **OAuth2 → URL Generator** tab
-2. Select scope: **bot**
-3. Select the permissions listed above
-4. Copy the generated URL and open it in a browser
-5. Select your server and authorize
-
-### 2e. Get IDs
-
-You'll need three values for `.env`:
-
-| Value | Where to Find It |
-|-------|-----------------|
-| `DISCORD_BOT_TOKEN` | Bot tab → Token (copied in 2a) |
-| `DISCORD_CLIENT_ID` | OAuth2 tab → Client ID (or General Information → Application ID) |
-| `DISCORD_GUILD_ID` | Right-click your server name in Discord → Copy Server ID (enable Developer Mode in Discord Settings → Advanced first) |
-
----
-
-## 3. Install Conductor
-
-```bash
-# Clone the repository
-git clone <repo-url> conductor
-cd conductor
-
-# Install Node.js dependencies
-npm install
+    class A,B,C,D control;
+    class E,F,G runtime;
+    class H warning;
 ```
 
----
+## 1. Prerequisites
 
-## 4. Configure Environment
+Install:
+
+| Dependency | Minimum | Check |
+|------------|---------|-------|
+| Node.js | 20+ | `node -v` |
+| Claude Code | v2.1.80+ | `claude --version` |
+
+Optional:
+
+| Dependency | Purpose |
+|------------|---------|
+| `tmux` | Legacy backend only |
+| Bun | Optional for legacy plugin experiments only |
+
+Claude Code must already be authenticated with a `claude.ai` account:
 
 ```bash
+claude
+```
+
+Conductor rejects Claude Code older than `2.1.80` at startup.
+
+## 2. Discord Bot
+
+Create a bot in the Discord Developer Portal and enable:
+
+- Message Content Intent
+
+Grant at least:
+
+- Manage Channels
+- Send Messages
+- Read Message History
+- Add Reactions
+
+Collect:
+
+- `DISCORD_BOT_TOKEN`
+- `DISCORD_CLIENT_ID`
+- `DISCORD_GUILD_ID`
+
+## 3. Install
+
+```bash
+git clone <repo-url> conductor
+cd conductor
+npm install
 cp .env.example .env
 ```
 
-Edit `.env` and fill in the three required values:
+## 4. Configure
+
+Required:
 
 ```env
-# REQUIRED — fill these in
-DISCORD_BOT_TOKEN=your-bot-token-here
-DISCORD_CLIENT_ID=your-client-id-here
-DISCORD_GUILD_ID=your-guild-id-here
+DISCORD_BOT_TOKEN=...
+DISCORD_CLIENT_ID=...
+DISCORD_GUILD_ID=...
 ```
 
-### Optional Configuration
-
-These have sensible defaults but can be tuned:
+Important defaults:
 
 ```env
-# Channel name for the command interface (default: orchestrator)
 ORCHESTRATOR_CHANNEL_NAME=orchestrator
-
-# Local API port — only binds to 127.0.0.1 (default: 7842)
+COMMAND_PREFIX=/
 CONDUCTOR_API_PORT=7842
-
-# Base directory for session working directories (default: ~/projects)
 DEFAULT_WORK_DIR=~/projects
-
-# Maximum concurrent sessions (default: 10)
-MAX_SESSIONS=10
-
-# Path to claude binary — defaults to 'claude' on PATH (default: claude)
-# Set this if claude is installed somewhere not on PATH
+TERMINAL_BACKEND=pty
+STRUCTURED_TRANSPORT=channel
+SESSION_RECONNECT_GRACE_MS=15000
 CLAUDE_BIN=claude
-
-# Kill sessions idle for this many minutes, 0 to disable (default: 120)
 SESSION_IDLE_TIMEOUT_MINS=120
-
-# Checkpoint interval in minutes (default: 15)
 CHECKPOINT_INTERVAL_MINS=15
-
-# Number of Discord messages to include in checkpoints (default: 50)
 CHECKPOINT_DISCORD_MESSAGES=50
-
-# Auto-resume interrupted sessions on daemon restart (default: false)
 AUTO_RESUME_ON_START=false
-
-# Move killed session channels to Archive category vs delete (default: true)
 ARCHIVE_ON_KILL=true
-
-# Typing indicator mode: 'typing' or 'off' (default: typing)
 INDICATOR_MODE=typing
 ```
 
----
+`TERMINAL_BACKEND=pty` is the supported path. `tmux` is legacy only.
 
-## 5. Create the Working Directory
+`STRUCTURED_TRANSPORT=channel` is the supported path. It uses a generated Node MCP channel server and the Claude development-channel flag internally.
 
-Make sure the directory specified by `DEFAULT_WORK_DIR` exists:
+Set `COMMAND_PREFIX` if `/` is already claimed by another bot. For example, `COMMAND_PREFIX=!` makes the control-plane commands `!help`, `!new`, and so on.
 
-```bash
-mkdir -p ~/projects
-```
+If you are upgrading from the legacy tmux-backed schema and startup reports `sessions.tmux_session` is still `NOT NULL`, delete `data/conductor.db`, `data/conductor.db-shm`, and `data/conductor.db-wal` before restarting.
 
-The `data/` directory (for SQLite) is created automatically on first run.
+## 5. Run
 
----
-
-## 6. Run Conductor
-
-### Development (foreground, with logs)
+Development:
 
 ```bash
 npm run dev
 ```
 
-You should see:
-```
-[HH:MM:SS] Conductor starting...
-[HH:MM:SS] Database initialized
-[HH:MM:SS] Discord bot logged in as YourBot#1234
-[HH:MM:SS] Daemon listening on 127.0.0.1:7842
-[HH:MM:SS] Conductor is fully operational.
-```
+Expected startup shape:
 
-### Production — macOS (launchd)
-
-1. Edit `scripts/com.conductor.plist`:
-   - Update `WorkingDirectory` to your Conductor install path
-   - Update the `node` path if yours differs (`which node`)
-
-2. Install and start:
-```bash
-cp scripts/com.conductor.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.conductor.plist
+```text
+[YYYY-MM-DD HH:MM:SS] [INFO] Conductor starting...
+[YYYY-MM-DD HH:MM:SS] [INFO] Discord bot logged in as ...
+[YYYY-MM-DD HH:MM:SS] [INFO] Daemon listening on 127.0.0.1:7842
+[YYYY-MM-DD HH:MM:SS] [INFO] Conductor is fully operational.
 ```
 
-3. Check logs:
-```bash
-tail -f /tmp/conductor.log
-tail -f /tmp/conductor-error.log
-```
+## 6. Verify
 
-4. Stop:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.conductor.plist
-```
+1. Open your Discord server.
+2. Confirm the `Conductor` category and the channel named by `ORCHESTRATOR_CHANNEL_NAME` exist (default `#orchestrator`).
+3. Run `<prefix>help` (default `/help`).
+4. Run `<prefix>new test-session` (default `/new test-session`).
+5. Confirm a `#test-session` channel appears and Claude replies arrive in Discord.
 
-### Production — Linux (systemd)
+## 7. Production
 
-1. Edit `scripts/conductor.service`:
-   - Update `WorkingDirectory` to your Conductor install path
-   - Update `EnvironmentFile` path
-   - Set the `User` if using template instantiation
+- macOS: use [scripts/com.conductor.plist](/mnt/d/Repositories/cc-conductor/scripts/com.conductor.plist)
+- Linux: use [scripts/conductor.service](/mnt/d/Repositories/cc-conductor/scripts/conductor.service)
 
-2. Install and start:
-```bash
-sudo cp scripts/conductor.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now conductor
-```
-
-3. Check logs:
-```bash
-journalctl -u conductor -f
-```
-
----
-
-## 7. Verify It Works
-
-1. Open your Discord server
-2. You should see a new **Conductor** category with a `#orchestrator` channel
-3. In `#orchestrator`, type: `/help`
-4. The bot should reply with available commands
-5. Try: `/new test-session`
-   - A new channel `#test-session` should appear
-   - Claude Code should start in a tmux session
-   - Messages you type in `#test-session` are relayed to Claude
-
----
+The daemon can restart without terminating live session workers.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `Missing required environment variable` | Check `.env` has all three required values filled in |
-| Bot doesn't respond in Discord | Verify the bot is online (green dot). Check token is correct. Check Message Content Intent is enabled. |
-| `claude: command not found` in tmux | Set `CLAUDE_BIN` in `.env` to the full path from `which claude` |
-| `tmux: command not found` | Install tmux and ensure it's on PATH |
-| Sessions spawn but no response | Check that Claude Code is authenticated — run `claude` manually first |
-| Port 7842 already in use | Change `CONDUCTOR_API_PORT` in `.env`, or kill the existing process: `lsof -ti:7842 \| xargs kill` |
-| Permission denied on database | Ensure the `data/` directory is writable by the user running Conductor |
+| Missing required environment variable | Fill in the three required Discord values |
+| Bot does not respond | Verify token, guild ID, invite permissions, and Message Content Intent |
+| `claude` not found | Set `CLAUDE_BIN` to the absolute Claude Code path |
+| Sessions start but do not answer | Verify Claude Code is authenticated and Channels are available in your Claude Code environment |
+| Session falls back to PTY | The structured channel server is disconnected; inspect daemon logs and worker state under `data/sessions/<id>/` |
+| Startup fails on Claude version | Upgrade Claude Code to `2.1.80+` and confirm `claude --version` |
+| Startup fails on `tmux_session` schema | Delete `data/conductor.db`, `data/conductor.db-shm`, and `data/conductor.db-wal`, then restart |
+| Port 7842 already in use | Change `CONDUCTOR_API_PORT` |
 
----
+## Automation Checklist
 
-## For Claude Code: Automated Setup Checklist
-
-If you're Claude Code setting this up for a user, run through these steps:
-
-1. **Check prerequisites**: `node -v`, `tmux -V`, `claude --version`
-2. **Install missing deps**: Use brew (macOS) or apt/dnf (Linux)
-3. **Run `npm install`** in the project root
-4. **Copy `.env.example` to `.env`** if `.env` doesn't exist
-5. **Ask the user** for `DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_ID`, and `DISCORD_GUILD_ID` — these cannot be guessed
-6. **Set `CLAUDE_BIN`** in `.env` if `claude` isn't on PATH (use output of `which claude`)
-7. **Create `DEFAULT_WORK_DIR`** (`mkdir -p ~/projects`)
-8. **Run `npm run dev`** to verify startup
-9. **Check Discord** for the `#orchestrator` channel and test `/help`
+1. Check `node -v` and `claude --version`.
+2. Run `npm install`.
+3. Copy `.env.example` to `.env`.
+4. Fill in the Discord credentials.
+5. Ensure Claude Code is authenticated.
+6. Run `npm run dev`.
+7. Test `<prefix>help` and `<prefix>new test-session` with your configured prefix.

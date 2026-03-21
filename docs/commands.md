@@ -1,86 +1,75 @@
-# Discord Commands
+# Commands
 
-All commands are issued in the **#orchestrator** channel (or whatever `ORCHESTRATOR_CHANNEL_NAME` is set to). Messages in session channels are relayed directly to Claude Code.
+All commands are issued in the channel named by `ORCHESTRATOR_CHANNEL_NAME` (default `#orchestrator`).
 
-## `/new <name> [dir]`
+Set `COMMAND_PREFIX` to change the control-plane prefix. The examples below use `<prefix>` as a placeholder; with the default config, `<prefix>` is `/`.
 
-Start a new Claude Code session.
+## Visual Overview
 
-- **name** — Session name. Must be 2-32 characters, lowercase alphanumeric and hyphens only, matching `/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/`.
-- **dir** (optional) — Project directory path. Supports `~` expansion. If omitted, defaults to `$DEFAULT_WORK_DIR/<name>` (created if it doesn't exist).
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart TD
+    User[Discord User] --> Router[Command Router]
+    Router --> New[new]
+    Router --> List[list]
+    Router --> Kill[kill]
+    Router --> Resume[resume]
+    Router --> AddDir[add-dir]
+    Router --> Mode[mode]
+    New --> Spawn[Create Channel and Spawn Worker]
+    Resume --> Recover[Resume Session]
+    AddDir --> Restart[Persist Path and Restart]
+    Kill --> Stop[Stop Worker and Archive or Delete]
+    Mode --> Typing[Update Typing Policy]
 
-**What happens:**
-1. Creates a Discord text channel `#<name>` under the Conductor category
-2. Creates a tmux session `conductor-<name>`
-3. Launches `claude --permission-mode acceptEdits` in that tmux session
-4. Auto-accepts workspace trust and permission prompts
-5. Starts the message bridge
-6. Posts a ready message with a link to the new channel
+    classDef edge fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1.5px;
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef warning fill:#FEF2F2,stroke:#DC2626,color:#7F1D1D,stroke-width:1.5px;
 
-**Example:**
+    class User edge;
+    class Router,New,List,Kill,Resume,AddDir,Mode control;
+    class Spawn,Recover,Restart,Typing runtime;
+    class Stop warning;
 ```
-/new my-feature ~/dev/my-project
-```
 
-## `/list`
+## `<prefix>new <name> [dir]`
 
-Show all sessions with their status.
+- Creates a Discord session channel
+- Creates a DB record
+- Spawns a detached session worker
+- Launches Claude Code with a stable session name
+- Loads the generated Discord channel server when structured transport is enabled
+- If startup fails, the orchestrator reply includes a shortened diagnostic summary and the relevant worker log paths
 
-Displays a Discord embed with:
-- Status emoji: 🟢 active, 🟡 starting/idle, 🟠 interrupted, 🔴 dead
-- Project directory
-- Session age
-- Time since last activity
-- Resume count (if > 0)
+## `<prefix>list`
 
-The list also performs a live tmux check — if a tmux session has disappeared, it's marked interrupted on the spot.
+Shows current sessions, status, project dir, age, and last activity.
 
-## `/kill <name>`
+## `<prefix>kill <name>`
 
-Kill a session. Prompts for confirmation with a button (30-second timeout).
+- Stops the session worker
+- Clears daemon-side transport state
+- Archives or deletes the Discord channel depending on `ARCHIVE_ON_KILL`
+- Deletes the session record
 
-**On confirm:**
-- Stops the message bridge
-- Kills the tmux session
-- Archives or deletes the Discord channel (controlled by `ARCHIVE_ON_KILL`)
-  - Archive: renames to `archive-<name>` and moves to an "Archive" category
-  - Delete: removes the channel entirely
-- Removes the session from the database
+## `<prefix>resume [name]`
 
-## `/resume [name]`
+Without a name, lists interrupted sessions.
 
-Resume an interrupted session or list resumable sessions.
+With a name, resume order is:
 
-**Without arguments:** Lists all interrupted sessions with how long ago they were interrupted.
+1. Claude CLI resume using the stable Conductor session name
+2. Conductor checkpoint fallback with resume prompt injection
 
-**With a session name:**
-1. Reads the checkpoint file from the project directory
-2. Fetches fresh Discord message history
-3. Merges checkpoint and Discord messages (deduplicates by timestamp)
-4. Builds a resume prompt with full context
-5. Spawns a new Claude Code instance in the same tmux session
-6. Injects the resume context
-7. Posts a resume notice with metrics (checkpoint used, messages injected)
+## `<prefix>add-dir`
 
-Only works on sessions with status `interrupted`.
+- In `#orchestrator`: `<prefix>add-dir <session> <path>`
+- In a session channel: `<prefix>add-dir <path>`
+- Persists an extra allowed directory for that session
+- Restarts the session so Claude relaunches with `--add-dir <path>`
+- If Claude later asks for a path outside the allowed set, Conductor posts an explicit notice instead of leaving the session hanging on the approval prompt
 
-## `/mode`
+## `<prefix>mode`
 
-Control the Discord typing indicator ("Conductor is typing..."). Available in both the orchestrator and session channels.
-
-**Orchestrator channel:**
-- `/mode` — Show the current global indicator mode
-- `/mode default <off|typing>` — Set the global default mode
-- `/mode <session> <off|typing|reset>` — Set indicator mode for a specific session (`reset` clears the override and inherits the global default)
-
-**Session channels:**
-- `/mode` — Show the current mode for this session
-- `/mode <off|typing|reset>` — Set indicator mode for this session
-
-The `/mode` command is intercepted before relay — it is never sent to Claude Code.
-
-**Fallback chain:** session DB value → global in-memory setting → `INDICATOR_MODE` env var → `typing`
-
-## `/help`
-
-Shows a Discord embed listing all available commands and their usage.
+Controls the Discord typing indicator globally or per session.

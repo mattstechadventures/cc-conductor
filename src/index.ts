@@ -1,56 +1,41 @@
 import 'dotenv/config';
 import { TextChannel } from 'discord.js';
-import { initDb, closeDb, getActiveSessions } from './sessions.js';
-import { createDiscordClient, setupBot, getConductorCategory } from './bot.js';
-import { createDaemon, startHealthMonitor, stopHealthMonitor } from './daemon.js';
-import { reconcileOnStartup } from './resume.js';
-import { startCheckpointScheduler, stopCheckpointScheduler, flushAllCheckpoints } from './checkpoint.js';
-import { killTmuxSession } from './tmux.js';
+import { createDiscordClient, getConductorCategory, setupBot } from './bot.js';
 import { stopAllBridges } from './bridge.js';
+import { flushAllCheckpoints, startCheckpointScheduler, stopCheckpointScheduler } from './checkpoint.js';
+import { createDaemon, startHealthMonitor, stopHealthMonitor } from './daemon.js';
 import { logger } from './logger.js';
+import { reconcileOnStartup } from './resume.js';
+import { closeDb, getActiveSessions, getSessionByName, initDb } from './sessions.js';
+import { waitForWorkerRegistrations } from './runtime-state.js';
+import { validateClaudeCli } from './claude-cli.js';
 
-// Validate required env vars
 const REQUIRED_VARS = ['DISCORD_BOT_TOKEN', 'DISCORD_CLIENT_ID', 'DISCORD_GUILD_ID'];
-for (const v of REQUIRED_VARS) {
-  if (!process.env[v]) {
-    logger.error(`Missing required environment variable: ${v}`);
+
+for (const variable of REQUIRED_VARS) {
+  if (!process.env[variable]) {
+    logger.error(`Missing required environment variable: ${variable}`);
     process.exit(1);
   }
 }
 
 async function main(): Promise<void> {
   logger.info('Conductor starting...');
-
-  // 1. Initialize database
   initDb();
+  const claude = validateClaudeCli();
+  process.env.CONDUCTOR_RESOLVED_CLAUDE_BIN = claude.resolvedPath;
+  logger.info(`Validated Claude Code ${claude.versionText} at ${claude.resolvedPath}`);
 
-  // 2. Create and login Discord client
   const client = createDiscordClient();
-
   await new Promise<void>((resolve, reject) => {
-    client.once('ready', () => {
-      logger.info(`Discord bot logged in as ${client.user?.tag}`);
-      resolve();
-    });
+    client.once('clientReady', () => resolve());
     client.once('error', reject);
-    client.login(process.env.DISCORD_BOT_TOKEN);
+    void client.login(process.env.DISCORD_BOT_TOKEN);
   });
 
-  // 3. Setup bot (create channels, register handlers)
+  logger.info(`Discord bot logged in as ${client.user?.tag}`);
   await setupBot(client);
 
-  // 4. Reconcile sessions on startup
-  const report = await reconcileOnStartup(client);
-  logger.info('Startup reconciliation:', report);
-
-  // 5. Auto-resume if configured
-  if (process.env.AUTO_RESUME_ON_START === 'true' && report.interrupted.length > 0) {
-    logger.info(`Auto-resuming ${report.interrupted.length} interrupted sessions...`);
-    // Resume is handled via the daemon API, which we're about to start
-    // We'll trigger resumes after the daemon is up
-  }
-
-  // 6. Start Express daemon
   const port = parseInt(process.env.CONDUCTOR_API_PORT || '7842', 10);
   const daemon = createDaemon({
     discordClient: client,
@@ -61,85 +46,74 @@ async function main(): Promise<void> {
     logger.info(`Daemon listening on 127.0.0.1:${port}`);
   });
 
-  // 7. Auto-resume interrupted sessions if configured
+  const reconnectGraceMs = parseInt(process.env.SESSION_RECONNECT_GRACE_MS || '15000', 10);
+  await waitForWorkerRegistrations(getActiveSessions().map(session => session.id), reconnectGraceMs);
+
+  const report = await reconcileOnStartup(client);
+  logger.info('Startup reconciliation', report);
+
   if (process.env.AUTO_RESUME_ON_START === 'true' && report.interrupted.length > 0) {
-    for (const name of report.interrupted) {
+    for (const sessionName of report.interrupted) {
+      const session = getSessionByName(sessionName);
+      if (!session) continue;
       try {
-        const res = await fetch(`http://localhost:${port}/sessions/spawn`, {
+        await fetch(`http://127.0.0.1:${port}/sessions/${session.id}/resume`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name }),
         });
-        logger.info(`Auto-resume request for ${name}:`, await res.json());
       } catch (err: any) {
-        logger.error(`Auto-resume failed for ${name}: ${err.message}`);
+        logger.error(`Auto-resume failed for ${sessionName}: ${err.message}`);
       }
     }
   }
 
-  // 8. Start health monitor
   startHealthMonitor(client);
-
-  // 9. Start checkpoint scheduler
   startCheckpointScheduler(() => getActiveSessions(), client);
 
-  // 10. Graceful shutdown handler
   let shuttingDown = false;
-
   async function shutdown(signal: string): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
-    logger.info(`Received ${signal} — shutting down...`);
+    logger.info(`Received ${signal}; shutting down daemon without terminating session workers...`);
 
-    // Post offline message
     try {
       const guild = client.guilds.cache.get(process.env.DISCORD_GUILD_ID!);
       if (guild) {
-        const orchName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
-        const orchChannel = guild.channels.cache.find(
-          c => c.name === orchName && c.isTextBased()
+        const orchestratorName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
+        const channel = guild.channels.cache.find(
+          entry => entry.name === orchestratorName && entry.isTextBased()
         ) as TextChannel | undefined;
-        if (orchChannel) {
-          await orchChannel.send('Conductor is going offline.');
+        if (channel) {
+          await channel.send('Conductor is going offline. Existing session workers will continue running and reconnect when the daemon returns.');
         }
       }
     } catch {
-      // Best effort
+      // best effort
     }
 
-    // Flush checkpoints
     try {
       const activeSessions = getActiveSessions();
       if (activeSessions.length > 0) {
-        logger.info(`Flushing checkpoints for ${activeSessions.length} active sessions...`);
         await flushAllCheckpoints(activeSessions, client);
       }
     } catch {
-      // Best effort
+      // best effort
     }
 
-    // Stop timers and bridges
     stopHealthMonitor();
     stopCheckpointScheduler();
     stopAllBridges();
-
-    // Kill all active tmux sessions
-    const activeSessions = getActiveSessions();
-    for (const s of activeSessions) {
-      killTmuxSession(s.tmuxSession);
-    }
-
-    // Close resources
     server.close();
     closeDb();
     client.destroy();
-
-    logger.info('Conductor shut down cleanly.');
     process.exit(0);
   }
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
+  process.on('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
 
   logger.info('Conductor is fully operational.');
 }

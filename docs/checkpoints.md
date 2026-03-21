@@ -1,72 +1,36 @@
 # Checkpoints
 
-Checkpoints periodically snapshot session state to disk, enabling recovery after crashes or restarts.
+Checkpoints are daemon-owned recovery snapshots written to `.conductor-checkpoint.json` in the project directory.
 
-## Checkpoint File
+## Visual Overview
 
-Written to `<projectDir>/.conductor-checkpoint.json`:
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    Session[Live Session State] --> Snapshot[Checkpoint Builder]
+    Git[Git Branch and Commit] --> Snapshot
+    Discord[Recent Discord History] --> Snapshot
+    Summary[Task Summary] --> Snapshot
+    Snapshot --> File[.conductor-checkpoint.json]
+    File --> Resume[Fallback Resume Input]
 
-```json
-{
-  "sessionId": "a1b2c3d4",
-  "sessionName": "my-session",
-  "projectDir": "/Users/matt/projects/my-session",
-  "writtenAt": 1710000900000,
-  "gitBranch": "feature/foo",
-  "gitLastCommit": "abc1234 Add new feature",
-  "taskSummary": "Working on implementing the search API endpoint...",
-  "recentMessages": [
-    {
-      "author": "matt",
-      "content": "add search to the API",
-      "timestamp": 1710000060000
-    },
-    {
-      "author": "claude",
-      "content": "I've added a GET /search endpoint...",
-      "timestamp": 1710000090000
-    }
-  ]
-}
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef storage fill:#FFF7E6,stroke:#D97706,color:#7C2D12,stroke-width:1.5px;
+
+    class Session,Git,Discord,Summary runtime;
+    class Snapshot control;
+    class File,Resume storage;
 ```
 
-## What Gets Captured
+Each checkpoint stores:
 
-### 1. Discord Messages
-Fetches the most recent messages from the session's Discord channel (default 50, configurable via `CHECKPOINT_DISCORD_MESSAGES`). Messages are sorted chronologically. Bot messages are attributed to "claude", user messages use the display name.
+- session ID and name
+- project directory
+- timestamp
+- current git branch
+- latest git commit
+- inferred task summary from recent Discord traffic
+- recent Discord messages
 
-### 2. Git State
-Reads from the project directory:
-- **Branch** — `git rev-parse --abbrev-ref HEAD`
-- **Last commit** — `git log -1 --oneline`
-
-Returns null for non-git directories.
-
-### 3. Task Summary
-Sends a prompt to Claude Code via tmux:
-```
-[CONDUCTOR_CHECKPOINT] Summarise in 2-3 sentences what you are currently working on or were last working on.
-```
-Waits 10 seconds, then captures the pane output and extracts Claude's response. This is best-effort — returns null if Claude doesn't respond in time.
-
-## Scheduling
-
-The checkpoint scheduler runs on an interval (default every 15 minutes, configurable via `CHECKPOINT_INTERVAL_MINS`). Set to 0 to disable.
-
-On each tick, it writes checkpoints for all active sessions. Failures are logged but don't stop other sessions from being checkpointed.
-
-## Flush on Shutdown
-
-When Conductor receives SIGTERM/SIGINT, it flushes checkpoints for all active sessions before killing tmux sessions. This uses `Promise.allSettled` so individual failures don't block shutdown.
-
-## Database Tracking
-
-The `sessions` table tracks:
-- `checkpoint_path` — path to the last checkpoint file
-- `last_checkpoint_at` — timestamp of the last checkpoint
-
-These are updated after each successful checkpoint write.
-
-## Related
-
-- [Resume & Recovery](resume-and-recovery.md) — how checkpoints are used during session resumption
+Checkpoints no longer depend on terminal pane scraping.

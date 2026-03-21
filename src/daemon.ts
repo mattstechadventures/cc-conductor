@@ -1,21 +1,56 @@
 import express from 'express';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { Client, TextChannel, ChannelType } from 'discord.js';
+import { ChannelType, Client, TextChannel } from 'discord.js';
 import { nanoid } from 'nanoid';
-import type { Session, SpawnRequest, DaemonResponse } from './types.js';
 import {
-  createSession, getSession, getSessionByName, getAllSessions,
-  getActiveSessions, updateSessionStatus, updateSessionActivity,
-  deleteSession, markInterrupted,
-} from './sessions.js';
-import { createTmuxSession, sendKeys, sendEnter, sendTmuxRaw, killTmuxSession, tmuxSessionExists, getSessionPid, capturePaneOutput } from './tmux.js';
-import { buildClaudeCommand } from './pairing.js';
-import { resumeSession } from './resume.js';
-import { startBridge, stopBridge } from './bridge.js';
+  disconnectChannel,
+  handleChannelReaction,
+  handleChannelReply,
+  handleWorkerNotice,
+  nextChannelEvent,
+  registerChannel,
+  registerWorker,
+  startBridge,
+  stopBridge,
+  updateWorkerHeartbeat,
+} from './bridge.js';
 import { logger } from './logger.js';
+import { resumeSession } from './resume.js';
+import {
+  createSession,
+  deleteSession,
+  getActiveSessions,
+  getAllSessions,
+  getSession,
+  getSessionByName,
+  getSessionInternalAuth,
+  markInterrupted,
+  updateSessionActivity,
+  updateSessionAdditionalDirs,
+  updateSessionRuntime,
+  updateSessionStatus,
+} from './sessions.js';
+import { managedPathsEqual, normalizeManagedPath, resolveUserPath } from './state.js';
+import type {
+  AddDirRequest,
+  AddDirResult,
+  ChannelReactionPayload,
+  ChannelReplyPayload,
+  DaemonResponse,
+  Session,
+  SpawnRequest,
+  WorkerHeartbeat,
+  WorkerRegistration,
+} from './types.js';
+import { getWorkerRuntime } from './runtime-state.js';
+import { spawnSessionWorker, terminateSessionWorker } from './worker-manager.js';
+import { formatCommand } from './command-prefix.js';
+import { restartSession } from './resume.js';
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
+const WORKER_STALE_MS = 20_000;
 
 let healthMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -30,66 +65,60 @@ export function createDaemon(deps: DaemonDeps): express.Express {
 
   const { discordClient, getConductorCategory } = deps;
 
-  // --- POST /sessions/spawn ---
   app.post('/sessions/spawn', async (req, res) => {
+    let createdChannel: TextChannel | null = null;
+    let createdSession: Session | null = null;
+    let bridgeStarted = false;
     try {
       const body = req.body as SpawnRequest;
-
-      // Validate name
       if (!body.name || !NAME_RE.test(body.name)) {
         res.json({ ok: false, error: 'Name must be 2-32 chars, lowercase alphanumeric and hyphens only' } as DaemonResponse);
         return;
       }
 
-      // Check duplicate
       if (getSessionByName(body.name)) {
         res.json({ ok: false, error: `Session "${body.name}" already exists` } as DaemonResponse);
         return;
       }
 
-      // Check max sessions
       const maxSessions = parseInt(process.env.MAX_SESSIONS || '10', 10);
-      const activeSessions = getActiveSessions();
-      if (activeSessions.length >= maxSessions) {
+      if (getActiveSessions().length >= maxSessions) {
         res.json({ ok: false, error: `Maximum sessions reached (${maxSessions})` } as DaemonResponse);
         return;
       }
 
-      // Resolve project dir
-      const defaultWorkDir = (process.env.DEFAULT_WORK_DIR || '~/projects').replace('~', process.env.HOME || '/root');
+      const defaultWorkDir = resolveUserPath(process.env.DEFAULT_WORK_DIR || path.join(os.homedir(), 'projects'));
       const projectDir = body.projectDir
-        ? path.resolve(body.projectDir.replace('~', process.env.HOME || '/root'))
+        ? resolveUserPath(body.projectDir)
         : path.join(defaultWorkDir, body.name);
 
-      // Ensure project dir exists
       if (!fs.existsSync(projectDir)) {
         fs.mkdirSync(projectDir, { recursive: true });
-        logger.info(`Created project directory: ${projectDir}`);
       }
 
-      // Create Discord channel
-      const guild = discordClient.guilds.cache.first();
+      const guild = discordClient.guilds.cache.get(process.env.DISCORD_GUILD_ID!);
       if (!guild) {
         res.json({ ok: false, error: 'Discord guild not found' } as DaemonResponse);
         return;
       }
 
-      const categoryId = getConductorCategory();
-      const channel = await guild.channels.create({
+      createdChannel = await guild.channels.create({
         name: body.name,
         type: ChannelType.GuildText,
-        parent: categoryId,
+        parent: getConductorCategory(),
         topic: `Claude Code session: ${body.name} | Dir: ${projectDir}`,
       });
 
-      // Create session record
+      const terminalBackend = process.env.TERMINAL_BACKEND === 'tmux' ? 'tmux' : 'pty';
+      const claudeSessionName = body.name;
       const session: Session = {
         id: nanoid(8),
         name: body.name,
-        discordChannelId: channel.id,
-        discordChannelName: channel.name,
-        tmuxSession: `conductor-${body.name}`,
+        discordChannelId: createdChannel.id,
+        discordChannelName: createdChannel.name,
+        tmuxSession: terminalBackend === 'tmux' ? `conductor-${body.name}` : null,
         projectDir,
+        additionalDirs: [],
         pid: null,
         status: 'starting',
         createdAt: Date.now(),
@@ -99,66 +128,53 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         resumeCount: 0,
         interruptedAt: null,
         indicatorMode: null,
+        workerId: null,
+        terminalBackend,
+        terminalHandle: terminalBackend === 'tmux' ? `conductor-${body.name}` : null,
+        transportKind: process.env.STRUCTURED_TRANSPORT === 'off' ? 'pty_fallback' : 'channel',
+        transportState: 'disconnected',
+        claudeSessionName,
+        claudeResumeRef: claudeSessionName,
+        workerStatus: 'starting',
       };
+
+      createdSession = session;
       createSession(session);
-
-      // Spawn tmux session
-      createTmuxSession(session.tmuxSession, session.projectDir);
-
-      // Build and send the claude command
-      const claudeCmd = buildClaudeCommand(session);
-      sendKeys(session.tmuxSession, claudeCmd);
-
-      // Wait for Claude Code to start, handle workspace trust prompt
-      const startedAt = Date.now();
-      const timeoutMs = 30_000;
-      let ready = false;
-
-      while (Date.now() - startedAt < timeoutMs) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        const pane = capturePaneOutput(session.tmuxSession, 30);
-
-        // Auto-accept workspace trust prompt ("Yes, I trust" is option 1, already selected)
-        if (pane.includes('Yes, I trust this folder')) {
-          sendEnter(session.tmuxSession);
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          continue;
-        }
-
-        // Auto-accept bypass permissions prompt (need to select option 2 "Yes, I accept")
-        if (pane.includes('Yes, I accept') && pane.includes('No, exit')) {
-          sendTmuxRaw(session.tmuxSession, 'Down');
-          await new Promise(resolve => setTimeout(resolve, 500));
-          sendEnter(session.tmuxSession);
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          continue;
-        }
-
-        // Check if Claude Code is at the prompt (❯) and NOT in a menu
-        if (pane.includes('❯') && !pane.includes('Enter to confirm') && !pane.includes('Yes, I trust') && !pane.includes('Yes, I accept')) {
-          ready = true;
-          break;
-        }
-      }
-
-      // Update status and start the bridge
-      const pid = getSessionPid(session.tmuxSession);
-      updateSessionStatus(session.id, ready ? 'active' : 'starting', pid ?? undefined);
-
-      if (ready) {
-        startBridge(session, discordClient);
-        await channel.send(`✓ Session **${session.name}** is live. Claude Code is running in \`${session.projectDir}\`.`);
+      startBridge(session, discordClient);
+      bridgeStarted = true;
+      const start = await spawnSessionWorker(session, { mode: 'new' });
+      if (!start.ready) {
+        stopBridge(session.id);
+        bridgeStarted = false;
+        await terminateSessionWorker(session);
+        deleteSession(session.id);
+        createdSession = null;
+        await deleteDiscordChannel(createdChannel);
+        createdChannel = null;
+        res.json({ ok: false, error: start.error || 'Worker failed to start' } as DaemonResponse);
+        return;
       }
 
       const updated = getSession(session.id)!;
-      res.json({ ok: true, data: updated } as DaemonResponse<Session>);
+      updateSessionStatus(session.id, 'active', updated.pid);
+
+      res.json({ ok: true, data: getSession(session.id)! } as DaemonResponse<Session>);
     } catch (err: any) {
+      if (bridgeStarted && createdSession) {
+        stopBridge(createdSession.id);
+      }
+      if (createdSession) {
+        await terminateSessionWorker(createdSession);
+        deleteSession(createdSession.id);
+      }
+      if (createdChannel) {
+        await deleteDiscordChannel(createdChannel);
+      }
       logger.error(`Spawn failed: ${err.message}`);
       res.json({ ok: false, error: err.message } as DaemonResponse);
     }
   });
 
-  // --- DELETE /sessions/:id ---
   app.delete('/sessions/:id', async (req, res) => {
     try {
       const session = getSession(req.params.id);
@@ -167,43 +183,9 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         return;
       }
 
-      // Stop bridge and kill tmux session
       stopBridge(session.id);
-      killTmuxSession(session.tmuxSession);
-
-      // Handle Discord channel
-      const archiveOnKill = process.env.ARCHIVE_ON_KILL !== 'false';
-      try {
-        const guild = discordClient.guilds.cache.first();
-        const channel = guild?.channels.cache.get(session.discordChannelId);
-        if (channel) {
-          if (archiveOnKill) {
-            // Archive: rename and optionally move to archive category
-            const textChannel = channel as TextChannel;
-            await textChannel.setName(`archive-${session.name}`);
-            await textChannel.send(`⚠ Session **${session.name}** has been killed and archived.`);
-
-            // Try to find or create an Archive category
-            if (guild) {
-              let archiveCat = guild.channels.cache.find(
-                c => c.name === 'Archive' && c.type === ChannelType.GuildCategory
-              );
-              if (!archiveCat) {
-                archiveCat = await guild.channels.create({
-                  name: 'Archive',
-                  type: ChannelType.GuildCategory,
-                });
-              }
-              await textChannel.setParent(archiveCat.id);
-            }
-          } else {
-            await channel.delete();
-          }
-        }
-      } catch (err: any) {
-        logger.error(`Failed to handle Discord channel for ${session.name}: ${err.message}`);
-      }
-
+      await terminateSessionWorker(session);
+      await handleSessionChannelDeletion(session, discordClient);
       deleteSession(session.id);
       res.json({ ok: true } as DaemonResponse);
     } catch (err: any) {
@@ -212,26 +194,14 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
   });
 
-  // --- GET /sessions ---
   app.get('/sessions', (_req, res) => {
     try {
-      const sessions = getAllSessions();
-      // Live status check
-      for (const session of sessions) {
-        if (session.status === 'active' || session.status === 'starting') {
-          if (!tmuxSessionExists(session.tmuxSession)) {
-            markInterrupted(session.id);
-            session.status = 'interrupted';
-          }
-        }
-      }
-      res.json({ ok: true, data: sessions } as DaemonResponse<Session[]>);
+      res.json({ ok: true, data: getAllSessions() } as DaemonResponse<Session[]>);
     } catch (err: any) {
       res.json({ ok: false, error: err.message } as DaemonResponse);
     }
   });
 
-  // --- GET /sessions/:id ---
   app.get('/sessions/:id', (req, res) => {
     try {
       const session = getSession(req.params.id);
@@ -245,7 +215,6 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
   });
 
-  // --- POST /sessions/:id/ping ---
   app.post('/sessions/:id/ping', (req, res) => {
     try {
       const session = getSession(req.params.id);
@@ -260,7 +229,6 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
   });
 
-  // --- POST /sessions/:id/resume ---
   app.post('/sessions/:id/resume', async (req, res) => {
     try {
       const session = getSession(req.params.id);
@@ -280,6 +248,212 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
   });
 
+  app.post('/sessions/:id/add-dir', async (req, res) => {
+    try {
+      const session = getSession(req.params.id);
+      if (!session) {
+        res.json({ ok: false, error: 'Session not found' } as DaemonResponse);
+        return;
+      }
+
+      if (session.status === 'dead') {
+        res.json({ ok: false, error: 'Session is dead. Start a new session instead.' } as DaemonResponse);
+        return;
+      }
+
+      if (session.status === 'starting') {
+        res.json({ ok: false, error: 'Session is still starting. Wait until it is live, then retry.' } as DaemonResponse);
+        return;
+      }
+
+      const body = req.body as AddDirRequest;
+      if (!body.path?.trim()) {
+        res.json({ ok: false, error: 'path is required' } as DaemonResponse);
+        return;
+      }
+
+      const normalizedPath = normalizeManagedPath(body.path);
+      let stats: fs.Stats;
+      try {
+        stats = fs.statSync(normalizedPath);
+      } catch {
+        res.json({ ok: false, error: `Directory does not exist: ${normalizedPath}` } as DaemonResponse);
+        return;
+      }
+
+      if (!stats.isDirectory()) {
+        res.json({ ok: false, error: `Path is not a directory: ${normalizedPath}` } as DaemonResponse);
+        return;
+      }
+
+      if (managedPathsEqual(session.projectDir, normalizedPath)) {
+        res.json({ ok: false, error: `Path is already the session root: ${normalizedPath}` } as DaemonResponse);
+        return;
+      }
+
+      if (session.additionalDirs.some(existing => managedPathsEqual(existing, normalizedPath))) {
+        res.json({ ok: false, error: `Path is already allowed for this session: ${normalizedPath}` } as DaemonResponse);
+        return;
+      }
+
+      updateSessionAdditionalDirs(session.id, [...session.additionalDirs, normalizedPath]);
+      const latest = getSession(session.id) || session;
+      const restart = await restartSession(latest, discordClient, 'directory-access-update');
+
+      res.json({
+        ok: true,
+        data: {
+          session: restart.session,
+          addedDir: normalizedPath,
+          resumeStrategy: restart.resumeStrategy,
+        } satisfies AddDirResult,
+      } as DaemonResponse<AddDirResult>);
+    } catch (err: any) {
+      logger.error(`Add-dir failed: ${err.message}`);
+      res.json({ ok: false, error: err.message } as DaemonResponse);
+    }
+  });
+
+  app.post('/internal/sessions/:id/worker/register', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'worker')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const payload = req.body as WorkerRegistration;
+    registerWorker(session.id, payload);
+    updateSessionRuntime(session.id, {
+      workerId: payload.workerId,
+      terminalBackend: payload.terminalBackend,
+      terminalHandle: payload.terminalHandle,
+      workerStatus: payload.workerStatus,
+      pid: payload.claudePid,
+    });
+    res.json({ ok: true });
+  });
+
+  app.post('/internal/sessions/:id/worker/heartbeat', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'worker')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const payload = req.body as WorkerHeartbeat;
+    updateWorkerHeartbeat(session.id, payload);
+    updateSessionRuntime(session.id, {
+      workerId: payload.workerId,
+      terminalBackend: payload.terminalBackend,
+      terminalHandle: payload.terminalHandle,
+      workerStatus: payload.workerStatus,
+      pid: payload.claudePid,
+    });
+
+    if (payload.workerStatus === 'ready') {
+      const latest = getSession(session.id);
+      if (latest && latest.status === 'starting') {
+        updateSessionStatus(session.id, 'active', payload.claudePid);
+        await postSessionReadyNotice(session.id, discordClient);
+      } else if (latest && latest.status === 'interrupted') {
+        updateSessionStatus(session.id, 'active', payload.claudePid);
+        await postReconnectedNotice(session.id, discordClient);
+      }
+    } else if (payload.workerStatus === 'exited') {
+      const latest = getSession(session.id);
+      if (latest && latest.status !== 'dead' && latest.status !== 'interrupted') {
+        markInterrupted(session.id);
+        await postInterruptedNotice(session.id, discordClient);
+      }
+    }
+
+    res.json({ ok: true });
+  });
+
+  app.post('/internal/sessions/:id/worker/notice', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'worker')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const payload = req.body as { message?: string };
+    if (!payload.message) {
+      res.status(400).json({ ok: false, error: 'message is required' });
+      return;
+    }
+
+    await handleWorkerNotice(session.id, payload.message, discordClient);
+    res.json({ ok: true });
+  });
+
+  app.post('/internal/sessions/:id/channel/register', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'channel')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    registerChannel(session.id);
+    updateSessionRuntime(session.id, {
+      transportKind: 'channel',
+      transportState: 'connected',
+    });
+    res.json({ ok: true });
+  });
+
+  app.post('/internal/sessions/:id/channel/disconnect', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'channel')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    disconnectChannel(session.id);
+    updateSessionRuntime(session.id, {
+      transportState: 'disconnected',
+    });
+    res.json({ ok: true });
+  });
+
+  app.get('/internal/sessions/:id/channel/events', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'channel')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const timeoutMs = Math.min(parseInt(String(req.query.timeoutMs || '25000'), 10), 30_000);
+    const event = await nextChannelEvent(session.id, timeoutMs);
+    if (!event) {
+      res.status(204).end();
+      return;
+    }
+    res.json(event);
+  });
+
+  app.post('/internal/sessions/:id/channel/reply', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'channel')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    await handleChannelReply(session.id, req.body as ChannelReplyPayload, discordClient);
+    res.json({ ok: true });
+  });
+
+  app.post('/internal/sessions/:id/channel/react', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'channel')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    await handleChannelReaction(session.id, req.body as ChannelReactionPayload, discordClient);
+    res.json({ ok: true });
+  });
+
   return app;
 }
 
@@ -293,41 +467,33 @@ export function startHealthMonitor(discordClient: Client): void {
         continue;
       }
 
-      // Check if tmux session is still alive
-      if (!tmuxSessionExists(session.tmuxSession)) {
-        logger.warn(`Session ${session.name}: tmux session gone — marking interrupted`);
+      const worker = getWorkerRuntime(session.id);
+      if (!worker || Date.now() - worker.lastHeartbeatAt > WORKER_STALE_MS) {
+        logger.warn(`Session ${session.name}: worker stale or missing`);
         markInterrupted(session.id);
-
-        try {
-          const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
-          if (channel) {
-            await channel.send(`⚠ Session **${session.name}** has been interrupted (process exited). Use \`/resume ${session.name}\` in #orchestrator to recover.`);
-          }
-        } catch {
-          // Best effort
-        }
+        await postInterruptedNotice(session.id, discordClient);
         continue;
       }
 
-      // Check idle timeout
       if (idleTimeoutMins > 0) {
         const idleMs = Date.now() - session.lastActiveAt;
         const idleMins = idleMs / 60_000;
-
         if (idleMins >= idleTimeoutMins) {
-          logger.info(`Session ${session.name}: idle for ${Math.round(idleMins)} minutes — killing`);
-
           try {
             const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
             if (channel) {
               await channel.send(`⚠ This session has been idle for ${Math.round(idleMins)} minutes and will be closed.`);
             }
           } catch {
-            // Best effort
+            // best effort
           }
 
-          killTmuxSession(session.tmuxSession);
-          updateSessionStatus(session.id, 'dead');
+          await terminateSessionWorker(session);
+          updateSessionStatus(session.id, 'dead', null);
+          updateSessionRuntime(session.id, {
+            transportState: 'disconnected',
+            workerStatus: 'stopped',
+          });
         }
       }
     }
@@ -338,5 +504,97 @@ export function stopHealthMonitor(): void {
   if (healthMonitorTimer) {
     clearInterval(healthMonitorTimer);
     healthMonitorTimer = null;
+  }
+}
+
+async function handleSessionChannelDeletion(session: Session, discordClient: Client): Promise<void> {
+  const archiveOnKill = process.env.ARCHIVE_ON_KILL !== 'false';
+  try {
+    const guild = discordClient.guilds.cache.get(process.env.DISCORD_GUILD_ID!);
+    const channel = guild?.channels.cache.get(session.discordChannelId);
+    if (!channel) return;
+
+    if (archiveOnKill) {
+      const textChannel = channel as TextChannel;
+      await textChannel.setName(`archive-${session.name}`);
+      await textChannel.send(`⚠ Session **${session.name}** has been killed and archived.`);
+
+      let archiveCategory = guild?.channels.cache.find(
+        entry => entry.name === 'Archive' && entry.type === ChannelType.GuildCategory
+      );
+      if (!archiveCategory && guild) {
+        archiveCategory = await guild.channels.create({
+          name: 'Archive',
+          type: ChannelType.GuildCategory,
+        });
+      }
+      if (archiveCategory) {
+        await textChannel.setParent(archiveCategory.id);
+      }
+      return;
+    }
+
+    await channel.delete();
+  } catch (err: any) {
+    logger.error(`Failed to handle Discord channel for ${session.name}: ${err.message}`);
+  }
+}
+
+async function deleteDiscordChannel(channel: TextChannel): Promise<void> {
+  try {
+    await channel.delete();
+  } catch {
+    // best effort
+  }
+}
+
+function authorizeInternal(
+  req: express.Request,
+  sessionId: string,
+  kind: 'worker' | 'channel'
+): boolean {
+  const auth = getSessionInternalAuth(sessionId);
+  if (!auth) return false;
+  const expected = kind === 'worker' ? auth.workerToken : auth.channelToken;
+  return req.headers.authorization === `Bearer ${expected}`;
+}
+
+async function postSessionReadyNotice(sessionId: string, discordClient: Client): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+  try {
+    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+    if (channel) {
+      await channel.send(`✓ Session **${session.name}** is live. Claude Code is running in \`${session.projectDir}\`.`);
+    }
+  } catch {
+    // best effort
+  }
+}
+
+async function postInterruptedNotice(sessionId: string, discordClient: Client): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+  const orchestratorName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
+  try {
+    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+    if (channel) {
+      await channel.send(`⚠ Session **${session.name}** has been interrupted. Use \`${formatCommand(`resume ${session.name}`)}\` in #${orchestratorName} to recover.`);
+    }
+  } catch {
+    // best effort
+  }
+}
+
+async function postReconnectedNotice(sessionId: string, discordClient: Client): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+  try {
+    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+    if (channel) {
+      await channel.send(`↺ Session **${session.name}** reconnected.`);
+    }
+  } catch {
+    // best effort
   }
 }

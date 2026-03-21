@@ -1,120 +1,64 @@
 # REST API
 
-The Express daemon listens on `127.0.0.1:7842` (configurable via `CONDUCTOR_API_PORT`). All responses follow the `DaemonResponse<T>` format:
+The daemon listens on `127.0.0.1:${CONDUCTOR_API_PORT}`.
 
-```json
-{
-  "ok": true,
-  "data": { ... }
-}
+## Visual Overview
+
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    Public[Public Client] --> PublicApi[Public Session Endpoints]
+    Worker[Session Worker] --> Internal[Internal Worker Endpoints]
+    Channel[Channel Server] --> ChannelApi[Internal Channel Endpoints]
+    PublicApi --> Daemon[Daemon API]
+    Internal --> Daemon
+    ChannelApi --> Daemon
+    Daemon --> SessionState[(Session State)]
+
+    classDef edge fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1.5px;
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef storage fill:#FFF7E6,stroke:#D97706,color:#7C2D12,stroke-width:1.5px;
+
+    class Public,Worker,Channel edge;
+    class PublicApi,Internal,ChannelApi,Daemon control;
+    class SessionState storage;
 ```
 
-Or on error:
+## Public Endpoints
 
-```json
-{
-  "ok": false,
-  "error": "Description of what went wrong"
-}
-```
+- `POST /sessions/spawn`
+- `DELETE /sessions/:id`
+- `GET /sessions`
+- `GET /sessions/:id`
+- `POST /sessions/:id/ping`
+- `POST /sessions/:id/resume`
+- `POST /sessions/:id/add-dir`
 
-## Endpoints
+## Internal Endpoints
 
-### `POST /sessions/spawn`
+These are localhost-only and require per-session bearer tokens:
 
-Create a new session.
+- `POST /internal/sessions/:id/worker/register`
+- `POST /internal/sessions/:id/worker/heartbeat`
+- `POST /internal/sessions/:id/worker/notice`
+- `POST /internal/sessions/:id/channel/register`
+- `POST /internal/sessions/:id/channel/disconnect`
+- `GET /internal/sessions/:id/channel/events`
+- `POST /internal/sessions/:id/channel/reply`
+- `POST /internal/sessions/:id/channel/react`
 
-**Request body:**
-```json
-{
-  "name": "my-session",
-  "projectDir": "~/dev/my-project",
-  "requestedBy": "discord-user-id"
-}
-```
+## Session Shape
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | 2-32 chars, lowercase alphanumeric + hyphens |
-| `projectDir` | No | Absolute or `~`-relative path. Defaults to `$DEFAULT_WORK_DIR/<name>` |
-| `requestedBy` | Yes | Discord user ID of the requester |
+Session payloads now describe generic runtime fields such as:
 
-**Validations:**
-- Name must match `/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/`
-- No duplicate session names
-- Active session count must be below `MAX_SESSIONS`
+- `workerId`
+- `terminalBackend`
+- `terminalHandle`
+- `transportKind`
+- `transportState`
+- `claudeSessionName`
+- `claudeResumeRef`
+- `workerStatus`
 
-**Response:** `DaemonResponse<Session>`
-
-### `DELETE /sessions/:id`
-
-Kill and clean up a session.
-
-- Stops the bridge
-- Kills the tmux session
-- Archives or deletes the Discord channel (per `ARCHIVE_ON_KILL`)
-- Removes the DB record
-
-**Response:** `DaemonResponse`
-
-### `GET /sessions`
-
-List all sessions. Performs a live tmux check — sessions whose tmux process has disappeared are marked `interrupted` inline.
-
-**Response:** `DaemonResponse<Session[]>`
-
-### `GET /sessions/:id`
-
-Get a single session by ID.
-
-**Response:** `DaemonResponse<Session>`
-
-### `POST /sessions/:id/ping`
-
-Update a session's `lastActiveAt` timestamp. Used to prevent idle timeout.
-
-**Response:** `DaemonResponse`
-
-### `POST /sessions/:id/resume`
-
-Resume an interrupted session. Only works if session status is `interrupted`.
-
-Triggers the full resume flow: reads checkpoint, fetches Discord history, builds resume prompt, spawns new Claude Code instance.
-
-**Response:** `DaemonResponse<ResumeResult>`
-
-```json
-{
-  "ok": true,
-  "data": {
-    "session": { ... },
-    "checkpointUsed": true,
-    "messagesInjected": 42,
-    "resumePromptLength": 3847
-  }
-}
-```
-
-## Session Object
-
-```json
-{
-  "id": "a1b2c3d4",
-  "name": "my-session",
-  "discordChannelId": "123456789",
-  "discordChannelName": "my-session",
-  "tmuxSession": "conductor-my-session",
-  "projectDir": "/Users/matt/projects/my-session",
-  "pid": 12345,
-  "status": "active",
-  "createdAt": 1710000000000,
-  "lastActiveAt": 1710000060000,
-  "lastCheckpointAt": 1710000900000,
-  "checkpointPath": "/Users/matt/projects/my-session/.conductor-checkpoint.json",
-  "resumeCount": 0,
-  "interruptedAt": null,
-  "indicatorMode": null
-}
-```
-
-**Status values:** `starting`, `active`, `idle`, `interrupted`, `dead`
+Legacy `tmuxSession` remains only for compatibility.

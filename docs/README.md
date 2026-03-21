@@ -1,35 +1,49 @@
-# Conductor Documentation
+# Conductor Docs
 
-Conductor is a self-hosted Discord-to-Claude Code terminal bridge. It turns a Discord server into a multi-session Claude Code orchestration hub — users post commands in a control channel, and Conductor spawns Claude Code sessions, creates matching Discord channels, and bridges two-way communication.
+## Visual Overview
 
-## Table of Contents
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart TD
+    Docs[Conductor Docs] --> Runtime[Architecture and Bridge]
+    Docs --> Lifecycle[Lifecycle and Recovery]
+    Docs --> Ops[Setup Deployment Config]
+    Docs --> Interfaces[Commands API Typing]
+    Docs --> Recovery[Checkpoints and Health]
 
-- [Architecture](architecture.md) — System overview, components, data flows
-- [Discord Commands](commands.md) — `/new`, `/list`, `/kill`, `/resume`, `/mode`, `/help`
-- [REST API](rest-api.md) — Express daemon endpoints
-- [Session Lifecycle](session-lifecycle.md) — Spawning, active state, idle timeout, termination
-- [Message Bridge](bridge.md) — Discord ↔ Claude Code relay via tmux polling
-- [Checkpoints](checkpoints.md) — Periodic state snapshots for recovery
-- [Resume & Recovery](resume-and-recovery.md) — Three failure modes and how Conductor handles each
-- [Health Monitoring](health-monitoring.md) — Dead session detection, idle timeout enforcement
-- [Configuration](configuration.md) — All environment variables and defaults
-- [Deployment](deployment.md) — macOS launchd and Linux systemd setup
-- [MCP Plugin](mcp-plugin.md) — Backup MCP-based Discord bridge
-- [Typing Indicator](typing-indicator.md) — Discord typing indicator and `/mode` command
+    Runtime --> Arch[architecture.md]
+    Runtime --> Bridge[bridge.md]
+    Runtime --> Plugin[mcp-plugin.md]
+    Lifecycle --> Session[session-lifecycle.md]
+    Lifecycle --> Resume[resume-and-recovery.md]
+    Ops --> Config[configuration.md]
+    Ops --> Deploy[deployment.md]
+    Interfaces --> Commands[commands.md]
+    Interfaces --> Api[rest-api.md]
+    Interfaces --> Typing[typing-indicator.md]
+    Recovery --> Checkpoints[checkpoints.md]
+    Recovery --> Health[health-monitoring.md]
 
-## Source Layout
+    classDef root fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef group fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef page fill:#EEF2FF,stroke:#4F46E5,color:#312E81,stroke-width:1.5px;
 
+    class Docs root;
+    class Runtime,Lifecycle,Ops,Interfaces,Recovery group;
+    class Arch,Bridge,Plugin,Session,Resume,Config,Deploy,Commands,Api,Typing,Checkpoints,Health page;
 ```
-src/
-├── index.ts          # Entry point, startup/shutdown orchestration
-├── bot.ts            # Discord client, command handlers
-├── daemon.ts         # Express API, session lifecycle, health monitor
-├── sessions.ts       # SQLite database layer
-├── tmux.ts           # tmux command wrappers
-├── bridge.ts         # Discord ↔ Claude polling bridge
-├── checkpoint.ts     # Checkpoint writing and scheduling
-├── resume.ts         # Session recovery and reconciliation
-├── pairing.ts        # Claude Code command builder
-├── logger.ts         # Structured logging
-└── types.ts          # TypeScript interfaces
-```
+
+- [Architecture](./architecture.md): daemon, session worker, and channel server roles
+- [Commands](./commands.md): Discord control-plane commands and prefix settings
+- Sessions can now gain extra allowed directories through `<prefix>add-dir`, without changing their base `projectDir`
+- Startup failures in Discord are shortened to fit Discord message limits and point to worker diagnostics under `data/sessions/<sessionId>/`
+- [Bridge](./bridge.md): structured Discord transport and PTY fallback
+- [Session Lifecycle](./session-lifecycle.md): spawn, active, interruption, kill
+- [Resume & Recovery](./resume-and-recovery.md): reconnect, Claude resume, checkpoint fallback
+- [Configuration](./configuration.md): environment variables
+- [Deployment](./deployment.md): service setup notes
+- [Checkpoints](./checkpoints.md): what gets persisted for recovery
+- [Health Monitoring](./health-monitoring.md): worker heartbeat and idle handling
+- [REST API](./rest-api.md): daemon endpoints
+- [MCP Plugin](./mcp-plugin.md): legacy experimental plugin path
+- [Typing Indicator](./typing-indicator.md): `<prefix>mode` behavior

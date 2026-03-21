@@ -3,13 +3,15 @@ import {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ComponentType,
 } from 'discord.js';
-import type { Session, DaemonResponse, ResumeResult } from './types.js';
+import type { AddDirResult, Session, DaemonResponse, ResumeResult } from './types.js';
 import { getSessionByChannelId, getSessionByName, getInterruptedSessions, updateSessionIndicatorMode } from './sessions.js';
 import { sendToSession, getGlobalIndicatorMode, setGlobalIndicatorMode } from './bridge.js';
 import type { IndicatorMode } from './types.js';
 import { logger } from './logger.js';
+import { formatCommand, parseCommand } from './command-prefix.js';
 
 const API_BASE = () => `http://localhost:${process.env.CONDUCTOR_API_PORT || '7842'}`;
+const DISCORD_MESSAGE_LIMIT = 2000;
 
 let conductorCategoryId: string | undefined;
 
@@ -50,6 +52,7 @@ export async function setupBot(client: Client): Promise<void> {
 
   // Ensure orchestrator channel exists
   const orchName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
+  const orchTopic = `Conductor control plane — use ${formatCommand('new')}, ${formatCommand('list')}, ${formatCommand('kill')}, ${formatCommand('resume')}, ${formatCommand('help')}`;
   let orchChannel = guild.channels.cache.find(
     c => c.name === orchName && c.parentId === category!.id && c.type === ChannelType.GuildText
   ) as TextChannel | undefined;
@@ -59,14 +62,16 @@ export async function setupBot(client: Client): Promise<void> {
       name: orchName,
       type: ChannelType.GuildText,
       parent: category.id,
-      topic: 'Conductor control plane — use /new, /list, /kill, /resume, /help',
+      topic: orchTopic,
     }) as TextChannel;
     logger.info(`Created #${orchName} channel`);
+  } else if (orchChannel.topic !== orchTopic) {
+    await orchChannel.setTopic(orchTopic);
   }
 
   // Post startup message
   await orchChannel.send(
-    '✓ Conductor is online. Use `/new <session-name> [<project-dir>]` to start a session.'
+    `✓ Conductor is online. Use \`${formatCommand('new <session-name> [<project-dir>]')}\` to start a session.`
   );
 
   // Register message handler
@@ -83,48 +88,55 @@ export async function setupBot(client: Client): Promise<void> {
     // Check if this is a session channel
     const session = getSessionByChannelId(message.channel.id);
     if (session) {
-      // Intercept /mode command in session channels
-      if (message.content.trim().startsWith('/mode')) {
-        await handleSessionMode(message, session);
+      const command = parseCommand(message.content);
+      if (command?.name === 'mode') {
+        await handleSessionMode(message, session, command.args);
+        return;
+      }
+      if (command?.name === 'add-dir') {
+        await handleSessionAddDir(message, session, command.args);
         return;
       }
       // Relay to Claude Code
       if (session.status === 'active' || session.status === 'starting') {
-        sendToSession(session, message.content, client);
+        const ok = await sendToSession(session, message.content, client);
+        if (!ok) {
+          await message.reply('This session is currently unavailable. The worker or structured channel transport is disconnected.');
+        }
       }
     }
   });
 }
 
 async function handleOrchestratorCommand(message: any): Promise<void> {
-  const content = message.content.trim();
-  if (!content.startsWith('/')) return;
-
-  const parts = content.split(/\s+/);
-  const command = parts[0].toLowerCase();
+  const command = parseCommand(message.content);
+  if (!command) return;
 
   try {
-    switch (command) {
-      case '/new':
-        await handleNew(message, parts.slice(1));
+    switch (command.name) {
+      case 'new':
+        await handleNew(message, command.args);
         break;
-      case '/list':
+      case 'list':
         await handleList(message);
         break;
-      case '/kill':
-        await handleKill(message, parts.slice(1));
+      case 'kill':
+        await handleKill(message, command.args);
         break;
-      case '/resume':
-        await handleResume(message, parts.slice(1));
+      case 'resume':
+        await handleResume(message, command.args);
         break;
-      case '/mode':
-        await handleMode(message, parts.slice(1));
+      case 'add-dir':
+        await handleAddDir(message, command.args);
         break;
-      case '/help':
+      case 'mode':
+        await handleMode(message, command.args);
+        break;
+      case 'help':
         await handleHelp(message);
         break;
       default:
-        await message.reply(`Unknown command: ${command}. Use \`/help\` for available commands.`);
+        await message.reply(`Unknown command: ${formatCommand(command.name)}. Use \`${formatCommand('help')}\` for available commands.`);
     }
   } catch (err: any) {
     logger.error(`Command handler error: ${err.message}`);
@@ -134,7 +146,7 @@ async function handleOrchestratorCommand(message: any): Promise<void> {
 
 async function handleNew(message: any, args: string[]): Promise<void> {
   if (args.length < 1) {
-    await message.reply('Usage: `/new <name> [dir]`');
+    await message.reply(`Usage: \`${formatCommand('new <name> [dir]')}\``);
     return;
   }
 
@@ -156,14 +168,12 @@ async function handleNew(message: any, args: string[]): Promise<void> {
 
     const data = await res.json() as DaemonResponse<Session>;
     if (data.ok && data.data) {
-      await reply.edit(
-        `✓ Session **${name}** is live → <#${data.data.discordChannelId}>`
-      );
+      await editReplyContent(reply, `✓ Session **${name}** is live → <#${data.data.discordChannelId}>`);
     } else {
-      await reply.edit(`Failed to start session: ${data.error}`);
+      await editReplyContent(reply, `Failed to start session: ${data.error}`);
     }
   } catch (err: any) {
-    await reply.edit(`Failed to start session: ${err.message}`);
+    await editReplyContent(reply, `Failed to start session: ${err.message}`);
   }
 }
 
@@ -221,7 +231,7 @@ async function handleList(message: any): Promise<void> {
 
 async function handleKill(message: any, args: string[]): Promise<void> {
   if (args.length < 1) {
-    await message.reply('Usage: `/kill <name>`');
+    await message.reply(`Usage: \`${formatCommand('kill <name>')}\``);
     return;
   }
 
@@ -292,11 +302,11 @@ async function handleResume(message: any, args: string[]): Promise<void> {
     // List interrupted sessions
     const interrupted = getInterruptedSessions();
     if (interrupted.length === 0) {
-      await message.reply('No interrupted sessions to resume. Usage: `/resume <name>`');
+      await message.reply(`No interrupted sessions to resume. Usage: \`${formatCommand('resume <name>')}\``);
       return;
     }
     const names = interrupted.map(s => `  • **${s.name}** (interrupted ${formatDuration(Date.now() - (s.interruptedAt || s.lastActiveAt))} ago)`);
-    await message.reply(`Interrupted sessions:\n${names.join('\n')}\n\nUse \`/resume <name>\` to resume.`);
+    await message.reply(`Interrupted sessions:\n${names.join('\n')}\n\nUse \`${formatCommand('resume <name>')}\` to resume.`);
     return;
   }
 
@@ -320,28 +330,49 @@ async function handleResume(message: any, args: string[]): Promise<void> {
     const data = await res.json() as DaemonResponse<ResumeResult>;
     if (data.ok && data.data) {
       const r = data.data;
-      await reply.edit(
+      await editReplyContent(
+        reply,
         `↺ Session **${name}** resumed (resume #${r.session.resumeCount}) → <#${r.session.discordChannelId}>\n` +
         `Checkpoint: ${r.checkpointUsed ? 'yes' : 'no'} | Messages injected: ${r.messagesInjected}`
       );
     } else {
-      await reply.edit(`Failed to resume: ${data.error}`);
+      await editReplyContent(reply, `Failed to resume: ${data.error}`);
     }
   } catch (err: any) {
-    await reply.edit(`Failed to resume: ${err.message}`);
+    await editReplyContent(reply, `Failed to resume: ${err.message}`);
   }
+}
+
+async function handleAddDir(message: any, args: string[]): Promise<void> {
+  if (args.length < 2) {
+    await message.reply(`Usage: \`${formatCommand('add-dir <session> <path>')}\``);
+    return;
+  }
+
+  const name = args[0];
+  const dir = args.slice(1).join(' ').trim();
+  const session = getSessionByName(name);
+  if (!session) {
+    await message.reply(`Session "${name}" not found.`);
+    return;
+  }
+
+  await applyAdditionalDirectory(message, session, dir);
 }
 
 async function handleMode(message: any, args: string[]): Promise<void> {
   if (args.length < 1) {
-    await message.reply(`Current global indicator mode: **${getGlobalIndicatorMode()}**\nUsage: \`/mode default <off|typing>\` or \`/mode <session> <off|typing|reset>\``);
+    await message.reply(
+      `Current global indicator mode: **${getGlobalIndicatorMode()}**\n` +
+      `Usage: \`${formatCommand('mode default <off|typing>')}\` or \`${formatCommand('mode <session> <off|typing|reset>')}\``
+    );
     return;
   }
 
   if (args[0] === 'default') {
     const mode = args[1] as IndicatorMode;
     if (mode !== 'off' && mode !== 'typing') {
-      await message.reply('Usage: `/mode default <off|typing>`');
+      await message.reply(`Usage: \`${formatCommand('mode default <off|typing>')}\``);
       return;
     }
     setGlobalIndicatorMode(mode);
@@ -349,7 +380,6 @@ async function handleMode(message: any, args: string[]): Promise<void> {
     return;
   }
 
-  // Per-session: /mode <session> <off|typing|reset>
   const sessionName = args[0];
   const mode = args[1];
   const session = getSessionByName(sessionName);
@@ -365,17 +395,16 @@ async function handleMode(message: any, args: string[]): Promise<void> {
     updateSessionIndicatorMode(session.id, mode);
     await message.reply(`✓ Session **${sessionName}** indicator mode set to **${mode}**`);
   } else {
-    await message.reply('Usage: `/mode <session> <off|typing|reset>`');
+    await message.reply(`Usage: \`${formatCommand('mode <session> <off|typing|reset>')}\``);
   }
 }
 
-async function handleSessionMode(message: any, session: Session): Promise<void> {
-  const parts = message.content.trim().split(/\s+/);
-  const mode = parts[1];
+async function handleSessionMode(message: any, session: Session, args: string[]): Promise<void> {
+  const mode = args[0];
 
   if (!mode) {
     const current = session.indicatorMode || `inherited (${getGlobalIndicatorMode()})`;
-    await message.reply(`Indicator mode: **${current}**\nUsage: \`/mode <off|typing|reset>\``);
+    await message.reply(`Indicator mode: **${current}**\nUsage: \`${formatCommand('mode <off|typing|reset>')}\``);
     return;
   }
 
@@ -386,8 +415,18 @@ async function handleSessionMode(message: any, session: Session): Promise<void> 
     updateSessionIndicatorMode(session.id, mode);
     await message.reply(`✓ Indicator mode set to **${mode}**`);
   } else {
-    await message.reply('Usage: `/mode <off|typing|reset>`');
+    await message.reply(`Usage: \`${formatCommand('mode <off|typing|reset>')}\``);
   }
+}
+
+async function handleSessionAddDir(message: any, session: Session, args: string[]): Promise<void> {
+  const dir = args.join(' ').trim();
+  if (!dir) {
+    await message.reply(`Usage: \`${formatCommand('add-dir <path>')}\``);
+    return;
+  }
+
+  await applyAdditionalDirectory(message, session, dir);
 }
 
 async function handleHelp(message: any): Promise<void> {
@@ -395,13 +434,14 @@ async function handleHelp(message: any): Promise<void> {
     .setTitle('Conductor Commands')
     .setColor(0x5865f2)
     .addFields(
-      { name: '/new <name> [dir]', value: 'Start a new Claude Code session. Creates a Discord channel and tmux session.', inline: false },
-      { name: '/list', value: 'List all sessions with status.', inline: false },
-      { name: '/kill <name>', value: 'Kill a session (with confirmation).', inline: false },
-      { name: '/resume [name]', value: 'Resume an interrupted session, or list interrupted sessions.', inline: false },
-      { name: '/mode default <off|typing>', value: 'Set the global typing indicator mode.', inline: false },
-      { name: '/mode <session> <off|typing|reset>', value: 'Set per-session typing indicator (reset = inherit global).', inline: false },
-      { name: '/help', value: 'Show this help.', inline: false },
+      { name: formatCommand('new <name> [dir]'), value: 'Start a new Claude Code session. Creates a Discord channel and launches a detached worker.', inline: false },
+      { name: formatCommand('list'), value: 'List all sessions with status.', inline: false },
+      { name: formatCommand('kill <name>'), value: 'Kill a session (with confirmation).', inline: false },
+      { name: formatCommand('resume [name]'), value: 'Resume an interrupted session, or list interrupted sessions.', inline: false },
+      { name: formatCommand('add-dir <session> <path>'), value: 'Allow an extra directory for a session and restart it to apply the new access.', inline: false },
+      { name: formatCommand('mode default <off|typing>'), value: 'Set the global typing indicator mode.', inline: false },
+      { name: formatCommand('mode <session> <off|typing|reset>'), value: 'Set per-session typing indicator (reset = inherit global).', inline: false },
+      { name: formatCommand('help'), value: 'Show this help.', inline: false },
     );
 
   await message.reply({ embeds: [embed] });
@@ -414,4 +454,44 @@ function formatDuration(ms: number): string {
   if (hours < 24) return `${hours}h ${mins % 60}m`;
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
+}
+
+async function applyAdditionalDirectory(message: any, session: Session, dir: string): Promise<void> {
+  if (!dir) {
+    await message.reply('Directory path is required.');
+    return;
+  }
+
+  const reply = await message.reply(`Adding \`${dir}\` to session **${session.name}** and restarting it…`);
+
+  try {
+    const res = await fetch(`${API_BASE()}/sessions/${session.id}/add-dir`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: dir }),
+    });
+    const data = await res.json() as DaemonResponse<AddDirResult>;
+    if (data.ok && data.data) {
+      await editReplyContent(
+        reply,
+        `✓ Added \`${data.data.addedDir}\` to session **${session.name}** and restarted it via **${data.data.resumeStrategy}** → <#${data.data.session.discordChannelId}>`
+      );
+    } else {
+      await editReplyContent(reply, `Failed to add directory: ${data.error}`);
+    }
+  } catch (err: any) {
+    await editReplyContent(reply, `Failed to add directory: ${err.message}`);
+  }
+}
+
+async function editReplyContent(reply: any, content: string): Promise<void> {
+  await reply.edit(truncateDiscordMessage(content));
+}
+
+function truncateDiscordMessage(content: string): string {
+  if (content.length <= DISCORD_MESSAGE_LIMIT) {
+    return content;
+  }
+
+  return `${content.slice(0, DISCORD_MESSAGE_LIMIT - 3)}...`;
 }

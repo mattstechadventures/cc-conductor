@@ -1,70 +1,39 @@
-# MCP Plugin (Backup Bridge)
+# MCP Plugin
 
-The MCP plugin at `plugin/discord-autopair/` is an alternative Discord bridge that uses the Model Context Protocol instead of tmux polling. It's a **backup/experimental** approach — the primary bridge is the tmux-based one in `src/bridge.ts`.
+Conductor’s supported structured path now uses the generated Node server in `src/channel-server.ts`.
 
-## How It Works
+The `plugin/discord-autopair/` directory is kept only as a legacy experimental reference. It is not the supported production path.
 
-Instead of polling tmux output, the MCP plugin runs as a Claude Code plugin loaded via `--dangerously-load-development-channels`. It communicates with Claude Code through the MCP protocol:
+## Visual Overview
 
-- **Inbound:** Discord messages are forwarded to Claude via MCP notifications (`notifications/claude/channel`)
-- **Outbound:** Claude calls the `reply` and `react` tools to send messages back to Discord
+```mermaid
+%%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
+flowchart LR
+    Daemon[Conductor Daemon] --> Register[Register Local MCP Entry]
+    Register --> Claude[Claude Code]
+    Claude --> Channel[Generated Channel Server]
+    Channel --> Daemon
+    Legacy[Legacy plugin/discord-autopair] -. optional experiment .-> Claude
 
-## Environment Variables
+    classDef control fill:#E8F1FF,stroke:#2F6FED,color:#102A43,stroke-width:1.5px;
+    classDef runtime fill:#E6FCF5,stroke:#0F766E,color:#134E4A,stroke-width:1.5px;
+    classDef legacy fill:#F1F5F9,stroke:#94A3B8,color:#334155,stroke-width:1.5px,stroke-dasharray: 5 3;
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_BOT_TOKEN` | Yes | Discord bot token |
-| `CONDUCTOR_CHANNEL_ID` | Yes | Discord channel ID to auto-pair to |
-| `CONDUCTOR_SESSION_NAME` | No | Session name for status messages |
-| `CONDUCTOR_PROJECT_DIR` | No | Project directory for status messages |
-| `CONDUCTOR_RESUME_PROMPT_PATH` | No | Path to resume prompt file (injected on startup, then deleted) |
-
-## Tools Provided
-
-### `reply`
-Send a message to the paired Discord channel.
-
-```json
-{
-  "chat_id": "channel-id",
-  "message": "Hello from Claude!"
-}
+    class Daemon,Register control;
+    class Claude,Channel runtime;
+    class Legacy legacy;
 ```
 
-Automatically splits messages exceeding Discord's 2000-character limit.
+## Supported Path
 
-### `react`
-Add an emoji reaction to a Discord message.
+- session-specific local-scope MCP entry in Claude's config for the active project
+- session-scoped extra directory access applied through Claude `--add-dir` launch args, not through the channel server
+- `node --import <repo-local tsx loader> src/channel-server.ts`
+- Claude development channel selector: `--dangerously-load-development-channels server:<session-server-name>`
+- daemon-owned Discord bot client
+- localhost bearer-authenticated callbacks between the daemon and the channel server
+- worker and terminal diagnostics under `data/sessions/<sessionId>/`
 
-```json
-{
-  "chat_id": "channel-id",
-  "message_id": "message-id",
-  "emoji": "👍"
-}
-```
+## Legacy Plugin Path
 
-## Resume Support
-
-If `CONDUCTOR_RESUME_PROMPT_PATH` is set and the file exists, the plugin injects its contents as the first MCP notification on startup, then deletes the file.
-
-## Lifecycle
-
-1. Discord client logs in and connects to the specified channel
-2. MCP server connects via stdio transport
-3. Posts a ready message: `✓ Session <name> is live.`
-4. Listens for Discord messages and forwards to Claude
-5. On shutdown (SIGTERM/SIGINT/beforeExit): posts "session ended" and disconnects
-
-## Why It's a Backup
-
-The MCP plugin requires `--dangerously-load-development-channels`, which is a research preview flag in Claude Code. The tmux bridge is more reliable and doesn't require experimental features. The plugin is kept as an alternative for cases where MCP-based communication is preferred.
-
-## Running Standalone
-
-```bash
-cd plugin/discord-autopair
-bun run server.ts
-```
-
-Requires Bun runtime and the MCP SDK dependency.
+The plugin directory may still be useful for experimentation, but it is optional and not required for the main runtime.

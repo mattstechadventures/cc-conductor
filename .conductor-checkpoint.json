@@ -1,0 +1,16 @@
+{
+  "sessionId": "4v9Dr433",
+  "sessionName": "cc-conductor",
+  "projectDir": "D:\\Repositories\\cc-conductor",
+  "writtenAt": 1774107288595,
+  "gitBranch": "codex/codex-cli-support",
+  "gitLastCommit": "b7c4733 feat: add Codex backend switching to CC Conductor",
+  "taskSummary": "✓ Session **cc-conductor** is live on **Claude** in `D:\\Repositories\\cc-conductor`. Inactive backend: **Codex** is never started.",
+  "recentMessages": [
+    {
+      "author": "Claude",
+      "content": "✓ Session **cc-conductor** is live on **Claude** in `D:\\Repositories\\cc-conductor`. Inactive backend: **Codex** is never started.",
+      "timestamp": 1774106875469
+    }
+  ]
+}

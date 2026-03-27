@@ -1,6 +1,6 @@
 # Discord Typing Indicator
 
-Shows "Conductor is typing..." in Discord while Claude Code is processing. Toggleable globally and per-session via the `<prefix>mode` command.
+Shows "CC Conductor is typing..." in Discord while Claude Code is processing. Toggleable globally and per-session via the `<prefix>mode` command.
 
 ## Visual Overview
 

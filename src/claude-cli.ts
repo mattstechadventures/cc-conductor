@@ -132,5 +132,9 @@ function buildExecutableCandidates(
 
   const rawPathExt = env.PATHEXT || '.COM;.EXE;.BAT;.CMD';
   const extensions = rawPathExt.split(';').filter(Boolean);
-  return [input, ...extensions.map(extension => `${input}${extension.toLowerCase()}`), ...extensions.map(extension => `${input}${extension.toUpperCase()}`)];
+  return [
+    ...extensions.map(extension => `${input}${extension.toLowerCase()}`),
+    ...extensions.map(extension => `${input}${extension.toUpperCase()}`),
+    input,
+  ];
 }

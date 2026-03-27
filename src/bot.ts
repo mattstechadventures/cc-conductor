@@ -3,7 +3,13 @@ import {
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ComponentType,
 } from 'discord.js';
-import type { AddDirResult, Session, DaemonResponse, ResumeResult } from './types.js';
+import {
+  formatInactiveBackendSummary,
+  getBackendDisplayName,
+  getDefaultAgentBackend,
+  isAgentBackend,
+} from './agent-backends.js';
+import type { AddDirResult, Session, DaemonResponse, ResumeResult, SwitchBackendResult } from './types.js';
 import { getSessionByChannelId, getSessionByName, getInterruptedSessions, updateSessionIndicatorMode } from './sessions.js';
 import { sendToSession, getGlobalIndicatorMode, setGlobalIndicatorMode } from './bridge.js';
 import type { IndicatorMode } from './types.js';
@@ -37,22 +43,32 @@ export async function setupBot(client: Client): Promise<void> {
   const guild = client.guilds.cache.get(guildId);
   if (!guild) throw new Error(`Guild ${guildId} not found — is the bot invited?`);
 
-  // Ensure Conductor category exists
+  // Keep the old category name compatible, but prefer the new human-facing label.
   let category = guild.channels.cache.find(
-    c => c.name === 'Conductor' && c.type === ChannelType.GuildCategory
+    c => c.name === 'CC Conductor' && c.type === ChannelType.GuildCategory
   );
   if (!category) {
+    const legacy = guild.channels.cache.find(
+      c => c.name === 'Conductor' && c.type === ChannelType.GuildCategory
+    );
+    if (legacy) {
+      category = legacy;
+      await category.setName('CC Conductor');
+      logger.info('Renamed Conductor category to CC Conductor');
+    }
+  }
+  if (!category) {
     category = await guild.channels.create({
-      name: 'Conductor',
+      name: 'CC Conductor',
       type: ChannelType.GuildCategory,
     });
-    logger.info('Created Conductor category');
+    logger.info('Created CC Conductor category');
   }
   conductorCategoryId = category.id;
 
   // Ensure orchestrator channel exists
   const orchName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
-  const orchTopic = `Conductor control plane — use ${formatCommand('new')}, ${formatCommand('list')}, ${formatCommand('kill')}, ${formatCommand('resume')}, ${formatCommand('help')}`;
+  const orchTopic = `CC Conductor control plane — use ${formatCommand('new')}, ${formatCommand('agent')}, ${formatCommand('list')}, ${formatCommand('kill')}, ${formatCommand('resume')}, ${formatCommand('help')}`;
   let orchChannel = guild.channels.cache.find(
     c => c.name === orchName && c.parentId === category!.id && c.type === ChannelType.GuildText
   ) as TextChannel | undefined;
@@ -71,7 +87,7 @@ export async function setupBot(client: Client): Promise<void> {
 
   // Post startup message
   await orchChannel.send(
-    `✓ Conductor is online. Use \`${formatCommand('new <session-name> [<project-dir>]')}\` to start a session.`
+    `✓ CC Conductor is online. Use \`${formatCommand('new <session-name> [<project-dir>] --agent <claude|codex>')}\` to start a session.`
   );
 
   // Register message handler
@@ -93,11 +109,15 @@ export async function setupBot(client: Client): Promise<void> {
         await handleSessionMode(message, session, command.args);
         return;
       }
+      if (command?.name === 'agent') {
+        await handleSessionAgent(message, session, command.args);
+        return;
+      }
       if (command?.name === 'add-dir') {
         await handleSessionAddDir(message, session, command.args);
         return;
       }
-      // Relay to Claude Code
+      // Relay to the active backend
       if (session.status === 'active' || session.status === 'starting') {
         const ok = await sendToSession(session, message.content, client);
         if (!ok) {
@@ -119,6 +139,9 @@ async function handleOrchestratorCommand(message: any): Promise<void> {
         break;
       case 'list':
         await handleList(message);
+        break;
+      case 'agent':
+        await handleAgent(message, command.args);
         break;
       case 'kill':
         await handleKill(message, command.args);
@@ -145,15 +168,15 @@ async function handleOrchestratorCommand(message: any): Promise<void> {
 }
 
 async function handleNew(message: any, args: string[]): Promise<void> {
-  if (args.length < 1) {
-    await message.reply(`Usage: \`${formatCommand('new <name> [dir]')}\``);
+  const parsed = parseNewCommandArgs(args);
+  if (!parsed) {
+    await message.reply(`Usage: \`${formatCommand('new <name> [dir] --agent <claude|codex>')}\``);
     return;
   }
 
-  const name = args[0];
-  const dir = args[1] || undefined;
+  const { name, dir, backend } = parsed;
 
-  const reply = await message.reply(`Starting session **${name}**…`);
+  const reply = await message.reply(`Starting session **${name}** on **${getBackendDisplayName(backend)}**…`);
 
   try {
     const res = await fetch(`${API_BASE()}/sessions/spawn`, {
@@ -163,12 +186,16 @@ async function handleNew(message: any, args: string[]): Promise<void> {
         name,
         projectDir: dir,
         requestedBy: message.author.id,
+        agentBackend: backend,
       }),
     });
 
     const data = await res.json() as DaemonResponse<Session>;
     if (data.ok && data.data) {
-      await editReplyContent(reply, `✓ Session **${name}** is live → <#${data.data.discordChannelId}>`);
+      await editReplyContent(
+        reply,
+        `✓ Session **${name}** is live on **${getBackendDisplayName(data.data.activeBackend)}** → <#${data.data.discordChannelId}>`
+      );
     } else {
       await editReplyContent(reply, `Failed to start session: ${data.error}`);
     }
@@ -214,6 +241,8 @@ async function handleList(message: any): Promise<void> {
         name: `${statusEmoji} ${s.name}`,
         value: [
           `Status: **${s.status}**`,
+          `Active backend: **${getBackendDisplayName(s.activeBackend)}**`,
+          formatInactiveBackendLine(s),
           `Dir: \`${s.projectDir}\``,
           `Created: ${age} ago`,
           `Last active: ${lastActive} ago`,
@@ -255,7 +284,7 @@ async function handleKill(message: any, args: string[]): Promise<void> {
   );
 
   const reply = await message.reply({
-    content: `Kill session **${name}**? This will terminate the Claude Code process.`,
+    content: `Kill session **${name}**? This will terminate the active ${getBackendDisplayName(session.activeBackend)} worker.`,
     components: [row],
   });
 
@@ -305,7 +334,9 @@ async function handleResume(message: any, args: string[]): Promise<void> {
       await message.reply(`No interrupted sessions to resume. Usage: \`${formatCommand('resume <name>')}\``);
       return;
     }
-    const names = interrupted.map(s => `  • **${s.name}** (interrupted ${formatDuration(Date.now() - (s.interruptedAt || s.lastActiveAt))} ago)`);
+    const names = interrupted.map(
+      s => `  • **${s.name}** (${getBackendDisplayName(s.activeBackend)}, interrupted ${formatDuration(Date.now() - (s.interruptedAt || s.lastActiveAt))} ago)`
+    );
     await message.reply(`Interrupted sessions:\n${names.join('\n')}\n\nUse \`${formatCommand('resume <name>')}\` to resume.`);
     return;
   }
@@ -332,8 +363,9 @@ async function handleResume(message: any, args: string[]): Promise<void> {
       const r = data.data;
       await editReplyContent(
         reply,
-        `↺ Session **${name}** resumed (resume #${r.session.resumeCount}) → <#${r.session.discordChannelId}>\n` +
-        `Checkpoint: ${r.checkpointUsed ? 'yes' : 'no'} | Messages injected: ${r.messagesInjected}`
+        `↺ Session **${name}** resumed on **${getBackendDisplayName(r.session.activeBackend)}** ` +
+        `(resume #${r.session.resumeCount}) → <#${r.session.discordChannelId}>\n` +
+        `Strategy: ${r.resumeStrategy} | Checkpoint: ${r.checkpointUsed ? 'yes' : 'no'} | Messages injected: ${r.messagesInjected}`
       );
     } else {
       await editReplyContent(reply, `Failed to resume: ${data.error}`);
@@ -358,6 +390,23 @@ async function handleAddDir(message: any, args: string[]): Promise<void> {
   }
 
   await applyAdditionalDirectory(message, session, dir);
+}
+
+async function handleAgent(message: any, args: string[]): Promise<void> {
+  if (args.length < 2 || !isAgentBackend(args[1])) {
+    await message.reply(`Usage: \`${formatCommand('agent <session> <claude|codex>')}\``);
+    return;
+  }
+
+  const sessionName = args[0];
+  const backend = args[1];
+  const session = getSessionByName(sessionName);
+  if (!session) {
+    await message.reply(`Session "${sessionName}" not found.`);
+    return;
+  }
+
+  await switchBackend(message, session, backend);
 }
 
 async function handleMode(message: any, args: string[]): Promise<void> {
@@ -419,6 +468,16 @@ async function handleSessionMode(message: any, session: Session, args: string[])
   }
 }
 
+async function handleSessionAgent(message: any, session: Session, args: string[]): Promise<void> {
+  const backend = args[0];
+  if (!isAgentBackend(backend)) {
+    await message.reply(`Usage: \`${formatCommand('agent <claude|codex>')}\``);
+    return;
+  }
+
+  await switchBackend(message, session, backend);
+}
+
 async function handleSessionAddDir(message: any, session: Session, args: string[]): Promise<void> {
   const dir = args.join(' ').trim();
   if (!dir) {
@@ -431,13 +490,14 @@ async function handleSessionAddDir(message: any, session: Session, args: string[
 
 async function handleHelp(message: any): Promise<void> {
   const embed = new EmbedBuilder()
-    .setTitle('Conductor Commands')
+    .setTitle('CC Conductor Commands')
     .setColor(0x5865f2)
     .addFields(
-      { name: formatCommand('new <name> [dir]'), value: 'Start a new Claude Code session. Creates a Discord channel and launches a detached worker.', inline: false },
+      { name: formatCommand('new <name> [dir] --agent <claude|codex>'), value: 'Start a new session on the selected backend. Omitting --agent uses DEFAULT_AGENT_BACKEND.', inline: false },
+      { name: formatCommand('agent <session> <claude|codex>'), value: 'Switch the active backend for a session from the orchestrator channel.', inline: false },
       { name: formatCommand('list'), value: 'List all sessions with status.', inline: false },
       { name: formatCommand('kill <name>'), value: 'Kill a session (with confirmation).', inline: false },
-      { name: formatCommand('resume [name]'), value: 'Resume an interrupted session, or list interrupted sessions.', inline: false },
+      { name: formatCommand('resume [name]'), value: 'Resume the currently active backend for an interrupted session, or list interrupted sessions.', inline: false },
       { name: formatCommand('add-dir <session> <path>'), value: 'Allow an extra directory for a session and restart it to apply the new access.', inline: false },
       { name: formatCommand('mode default <off|typing>'), value: 'Set the global typing indicator mode.', inline: false },
       { name: formatCommand('mode <session> <off|typing|reset>'), value: 'Set per-session typing indicator (reset = inherit global).', inline: false },
@@ -474,7 +534,7 @@ async function applyAdditionalDirectory(message: any, session: Session, dir: str
     if (data.ok && data.data) {
       await editReplyContent(
         reply,
-        `✓ Added \`${data.data.addedDir}\` to session **${session.name}** and restarted it via **${data.data.resumeStrategy}** → <#${data.data.session.discordChannelId}>`
+        `✓ Added \`${data.data.addedDir}\` to session **${session.name}** and restarted **${getBackendDisplayName(data.data.session.activeBackend)}** via **${data.data.resumeStrategy}** → <#${data.data.session.discordChannelId}>`
       );
     } else {
       await editReplyContent(reply, `Failed to add directory: ${data.error}`);
@@ -486,6 +546,67 @@ async function applyAdditionalDirectory(message: any, session: Session, dir: str
 
 async function editReplyContent(reply: any, content: string): Promise<void> {
   await reply.edit(truncateDiscordMessage(content));
+}
+
+async function switchBackend(message: any, session: Session, backend: 'claude' | 'codex'): Promise<void> {
+  if (session.activeBackend === backend) {
+    await message.reply(`Session **${session.name}** is already on **${getBackendDisplayName(backend)}**.`);
+    return;
+  }
+
+  const reply = await message.reply(
+    `Switching session **${session.name}** from **${getBackendDisplayName(session.activeBackend)}** to **${getBackendDisplayName(backend)}**…`
+  );
+
+  try {
+    const res = await fetch(`${API_BASE()}/sessions/${session.id}/backend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend }),
+    });
+    const data = await res.json() as DaemonResponse<SwitchBackendResult>;
+    if (data.ok && data.data) {
+      await editReplyContent(
+        reply,
+        `✓ Session **${session.name}** switched to **${getBackendDisplayName(data.data.activeBackend)}**.\n` +
+        `Handoff prompt: ${data.data.handoffPromptLength} chars | Inactive backend parked: ${data.data.inactiveBackendParked ? 'yes' : 'no'}`
+      );
+    } else {
+      await editReplyContent(reply, `Failed to switch backend: ${data.error}`);
+    }
+  } catch (err: any) {
+    await editReplyContent(reply, `Failed to switch backend: ${err.message}`);
+  }
+}
+
+function parseNewCommandArgs(args: string[]): { name: string; dir?: string; backend: 'claude' | 'codex' } | null {
+  if (args.length < 1) {
+    return null;
+  }
+
+  const mutable = [...args];
+  let backend = getDefaultAgentBackend();
+  const backendFlag = mutable.indexOf('--agent');
+  if (backendFlag !== -1) {
+    const requested = mutable[backendFlag + 1];
+    if (!isAgentBackend(requested)) {
+      return null;
+    }
+    backend = requested;
+    mutable.splice(backendFlag, 2);
+  }
+
+  const name = mutable[0];
+  if (!name) {
+    return null;
+  }
+
+  const dir = mutable.slice(1).join(' ').trim() || undefined;
+  return { name, dir, backend };
+}
+
+function formatInactiveBackendLine(session: Session): string {
+  return formatInactiveBackendSummary(session);
 }
 
 function truncateDiscordMessage(content: string): string {

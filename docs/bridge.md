@@ -1,4 +1,4 @@
-# Message Bridge
+# CC Conductor Message Bridge
 
 The supported bridge is structured, not scraped.
 
@@ -35,7 +35,7 @@ flowchart LR
 For active sessions with a connected channel server:
 
 1. A Discord message arrives in a session channel.
-2. Conductor registers a session-specific local-scope MCP server in Claude Code for that project.
+2. CC Conductor registers a session-specific local-scope MCP server in Claude Code for that project.
 3. The daemon queues a `notifications/claude/channel` event for that session.
 4. Claude launches with the session's persisted `additionalDirs` as `--add-dir` arguments.
 5. Claude loads the registered channel server through `--dangerously-load-development-channels server:<session-server-name>`.
@@ -46,8 +46,13 @@ For active sessions with a connected channel server:
 
 Claude replies do not come from terminal capture in this path.
 The registered local-scope server pins the repo-local `tsx` loader by absolute path so channel startup does not depend on the session project's current working directory.
-Worker readiness is held behind Claude's startup gates: folder trust, development-channel consent, and tool approval prompts must clear before the session is treated as ready, and the worker only marks ready once Claude's live session UI is visible.
+Codex readiness is established by an immediate worker `ready` heartbeat after the worker HTTP server comes up.
+Worker readiness is held behind Claude's startup gates: folder trust, development-channel consent, and known-safe one-time approval prompts must clear before the session is treated as ready, and the worker only marks ready once Claude's live session UI is visible.
 If Claude requests access outside the session root plus `additionalDirs`, the worker dismisses that approval prompt and the daemon posts an explicit Discord notice instead of leaving the session hanging.
+Known-safe one-time approvals include the current `update-config` skill prompt and the one-time `settings.json` edit approval. Persistent approval options are not auto-selected.
+If Claude hits an unknown blocking modal that persists for 30 seconds, the worker interrupts the session and posts the diagnostic log paths instead of hanging forever.
+If a reconnecting worker reports a missing or mismatched runtime build id, the daemon interrupts that session instead of reattaching stale code.
+When the daemon needs to stop a stale worker and the worker control endpoint no longer accepts the session token, it falls back to terminating the local worker PID directly.
 
 ## PTY Fallback
 

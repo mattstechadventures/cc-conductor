@@ -15,9 +15,10 @@ import {
 import { buildClaudeLaunch } from './pairing.js';
 import { formatCommand } from './command-prefix.js';
 import { logger } from './logger.js';
-import { writeJsonFile } from './state.js';
+import { toRepoRelativePath, writeJsonFile } from './state.js';
 import { analyzeTerminalOutput } from './worker-prompts.js';
 import type {
+  AgentBackend,
   Session,
   TerminalBackend,
   WorkerHeartbeat,
@@ -43,10 +44,13 @@ const stdoutLogPath = process.env.CONDUCTOR_WORKER_STDOUT_LOG_PATH || path.join(
 const stderrLogPath = process.env.CONDUCTOR_WORKER_STDERR_LOG_PATH || path.join(workerStateDir, 'worker.stderr.log');
 const terminalLogPath = process.env.CONDUCTOR_TERMINAL_LOG_PATH || path.join(workerStateDir, 'terminal.log');
 const resumePromptPath = process.env.CONDUCTOR_RESUME_PROMPT_PATH || '';
+const runtimeBuildId = requiredEnv('CONDUCTOR_RUNTIME_BUILD_ID');
 const structuredTransport = process.env.CONDUCTOR_STRUCTURED_TRANSPORT === 'channel';
 const configuredBackend = (process.env.CONDUCTOR_TERMINAL_BACKEND as TerminalBackend | undefined) || 'pty';
 const terminalBackend: TerminalBackend = configuredBackend === 'tmux' ? 'tmux' : 'pty';
+const activeBackend = (process.env.CONDUCTOR_ACTIVE_BACKEND as AgentBackend | undefined) || 'claude';
 const tmuxSessionName = process.env.CONDUCTOR_TMUX_SESSION || `conductor-${sessionName}`;
+const UNKNOWN_BLOCKING_MODAL_STALL_MS = 30_000;
 
 const session: Session = {
   id: sessionId,
@@ -70,6 +74,8 @@ const session: Session = {
   terminalHandle: terminalBackend === 'tmux' ? tmuxSessionName : null,
   transportKind: structuredTransport ? 'channel' : 'pty_fallback',
   transportState: 'disconnected',
+  activeBackend,
+  backendStates: [],
   claudeSessionName,
   claudeResumeRef,
   workerStatus: 'starting',
@@ -85,6 +91,9 @@ let lastDevelopmentChannelActionAt = 0;
 let lastPermissionActionAt = 0;
 let lastBlockedDirectoryNoticeAt = 0;
 let lastBlockedDirectorySignature = '';
+let unknownBlockingModalSignature: string | null = null;
+let unknownBlockingModalSince = 0;
+let unknownBlockingModalTriggered = false;
 let lastError: string | null = null;
 let lastExitCode: number | null = null;
 let ptyProcess: pty.IPty | null = null;
@@ -128,6 +137,7 @@ async function main(): Promise<void> {
           workerId,
           workerStatus,
           ready,
+          activeBackend,
           terminalBackend,
           terminalHandle: getTerminalHandle(),
           claudePid: getClaudePid(),
@@ -236,9 +246,15 @@ async function startClaudeRuntime(): Promise<void> {
 function observeOutput(chunk: string): void {
   if (!chunk) return;
   lastObservedOutput = `${lastObservedOutput}${chunk}`.slice(-30_000);
+  evaluateTerminalState();
+}
+
+function evaluateTerminalState(): void {
+  if (!lastObservedOutput || shuttingDown) return;
   const signals = analyzeTerminalOutput(lastObservedOutput);
 
   if (signals.isOutsideAllowedDirectoryPrompt) {
+    resetUnknownBlockingModal();
     const signature = signals.blockedDirectoryPath || 'outside-allowed-directories';
     if (
       signature !== lastBlockedDirectorySignature ||
@@ -255,6 +271,7 @@ function observeOutput(chunk: string): void {
   }
 
   if (Date.now() - lastPermissionActionAt > 3_000 && signals.isPermissionPrompt) {
+    resetUnknownBlockingModal();
     lastPermissionActionAt = Date.now();
     logger.info(`Worker ${workerId} auto-accepted permission prompt`);
     lastObservedOutput = '';
@@ -267,6 +284,7 @@ function observeOutput(chunk: string): void {
   }
 
   if (!ready && signals.isReadyPrompt) {
+    resetUnknownBlockingModal();
     ready = true;
     workerStatus = 'ready';
     writeStateFile();
@@ -278,6 +296,7 @@ function observeOutput(chunk: string): void {
   }
 
   if (!ready && Date.now() - lastTrustActionAt > 3_000 && signals.isTrustPrompt) {
+    resetUnknownBlockingModal();
     lastTrustActionAt = Date.now();
     logger.info(`Worker ${workerId} auto-confirmed trust prompt`);
     lastObservedOutput = '';
@@ -286,12 +305,15 @@ function observeOutput(chunk: string): void {
   }
 
   if (!ready && Date.now() - lastDevelopmentChannelActionAt > 3_000 && signals.isDevelopmentChannelPrompt) {
+    resetUnknownBlockingModal();
     lastDevelopmentChannelActionAt = Date.now();
     logger.info(`Worker ${workerId} auto-confirmed development channel prompt`);
     lastObservedOutput = '';
     void sendEnter();
     return;
   }
+
+  updateUnknownBlockingModal(signals);
 }
 
 async function sendMessage(message: string): Promise<void> {
@@ -351,6 +373,10 @@ async function postBlockedDirectoryNotice(blockedDirectoryPath: string | null): 
     ? `Claude requested access to \`${blockedDirectoryPath}\`, but that path is outside this session's allowed directories. Use \`${orchestratorCommand}\` in #${process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator'} or \`${sessionCommand}\` in this session channel, then retry.`
     : `Claude requested access outside this session's allowed directories. Use \`${orchestratorCommand}\` in #${process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator'} or \`${sessionCommand}\` in this session channel, then retry.`;
 
+  await postWorkerNotice(message);
+}
+
+async function postWorkerNotice(message: string): Promise<void> {
   await fetch(`${daemonUrl}/internal/sessions/${sessionId}/worker/notice`, {
     method: 'POST',
     headers: {
@@ -364,9 +390,11 @@ async function postBlockedDirectoryNotice(blockedDirectoryPath: string | null): 
 async function registerWithDaemon(): Promise<void> {
   const registration: WorkerRegistration = {
     workerId,
+    runtimeBuildId,
     port: serverPort,
     pid: process.pid,
     claudePid: getClaudePid(),
+    activeBackend,
     terminalHandle: getTerminalHandle(),
     terminalBackend,
     workerStatus,
@@ -384,6 +412,7 @@ async function registerWithDaemon(): Promise<void> {
 
 function startHeartbeat(): void {
   heartbeatTimer = setInterval(() => {
+    evaluateTerminalState();
     void heartbeat();
   }, 5_000);
 }
@@ -391,9 +420,11 @@ function startHeartbeat(): void {
 async function heartbeat(): Promise<void> {
   const heartbeatPayload: WorkerHeartbeat = {
     workerId,
+    runtimeBuildId,
     port: serverPort,
     pid: process.pid,
     claudePid: getClaudePid(),
+    activeBackend,
     terminalHandle: getTerminalHandle(),
     terminalBackend,
     workerStatus,
@@ -414,9 +445,11 @@ function writeStateFile(): void {
   const state: WorkerStateFile = {
     sessionId,
     workerId,
+    runtimeBuildId,
     port: serverPort || null,
     pid: process.pid,
     claudePid: getClaudePid(),
+    activeBackend,
     terminalBackend,
     terminalHandle: getTerminalHandle(),
     workerStatus,
@@ -452,6 +485,7 @@ async function handleRuntimeExit(exitCode?: number | null): Promise<void> {
   }
   workerStatus = 'exited';
   ready = false;
+  resetUnknownBlockingModal();
   await heartbeat();
   await shutdown('runtime-exit');
 }
@@ -460,6 +494,7 @@ async function shutdown(reason: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`Worker ${workerId} shutting down: ${reason}`);
+  resetUnknownBlockingModal();
 
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (tmuxPollTimer) clearInterval(tmuxPollTimer);
@@ -517,6 +552,57 @@ function sleep(ms: number): Promise<void> {
 function appendTerminalLog(chunk: string): void {
   if (!chunk || !terminalLogStream) return;
   terminalLogStream.write(chunk);
+}
+
+function updateUnknownBlockingModal(
+  signals: ReturnType<typeof analyzeTerminalOutput>
+): void {
+  if (!signals.isUnknownBlockingModal || !signals.blockingModalSignature) {
+    resetUnknownBlockingModal();
+    return;
+  }
+
+  if (signals.blockingModalSignature !== unknownBlockingModalSignature) {
+    unknownBlockingModalSignature = signals.blockingModalSignature;
+    unknownBlockingModalSince = Date.now();
+    unknownBlockingModalTriggered = false;
+    return;
+  }
+
+  if (unknownBlockingModalTriggered) {
+    return;
+  }
+
+  if (Date.now() - unknownBlockingModalSince < UNKNOWN_BLOCKING_MODAL_STALL_MS) {
+    return;
+  }
+
+  unknownBlockingModalTriggered = true;
+  logger.warn(`Worker ${workerId} interrupted stuck modal: ${signals.blockingModalSignature}`);
+  void interruptForUnknownBlockingModal();
+}
+
+function resetUnknownBlockingModal(): void {
+  unknownBlockingModalSignature = null;
+  unknownBlockingModalSince = 0;
+  unknownBlockingModalTriggered = false;
+}
+
+async function interruptForUnknownBlockingModal(): Promise<void> {
+  const diagnosticPaths = [
+    toRepoRelativePath(stdoutLogPath),
+    toRepoRelativePath(stderrLogPath),
+    toRepoRelativePath(terminalLogPath),
+  ];
+  const failureMessage = 'Claude is blocked on an unrecognized approval dialog.';
+  const notice =
+    `${failureMessage} The session was interrupted to avoid hanging forever. ` +
+    `See ${diagnosticPaths.join(', ')}.`;
+
+  recordFailure(failureMessage, lastExitCode);
+  lastObservedOutput = '';
+  await postWorkerNotice(notice);
+  await handleRuntimeExit(lastExitCode);
 }
 
 function recordFailure(message: string, exitCode: number | null): void {

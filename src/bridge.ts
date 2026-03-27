@@ -1,7 +1,9 @@
 import { Client, TextChannel } from 'discord.js';
 import {
+  beginSessionTurn,
   applyWorkerHeartbeat,
   clearRuntimeState,
+  endSessionTurn,
   ensureRuntimeState,
   isChannelConnected,
   markChannelConnected,
@@ -90,6 +92,34 @@ export async function sendToSession(
   ensureRuntimeState(session.id);
   updateSessionActivity(session.id);
   startTypingIndicator(session, discordClient || null);
+  const turnStarted = beginSessionTurn(session.id, session.activeBackend);
+
+  if (session.activeBackend === 'codex') {
+    if (!turnStarted) {
+      stopTypingIndicator(session.id);
+      logger.warn(`Turn already in progress for ${session.name}`);
+      return false;
+    }
+
+    const workerResult = await sendInputToWorker(session, message);
+    if (workerResult.ok) {
+      updateSessionRuntime(session.id, {
+        transportKind: 'worker_http',
+        transportState: 'connected',
+      });
+      logger.info(`Sent worker-backed turn for ${session.name} via Codex`);
+      return true;
+    }
+
+    endSessionTurn(session.id);
+    stopTypingIndicator(session.id);
+    updateSessionRuntime(session.id, {
+      transportKind: 'worker_http',
+      transportState: 'disconnected',
+    });
+    logger.warn(`Worker-backed Codex turn failed for ${session.name}: ${workerResult.error || 'unknown error'}`);
+    return false;
+  }
 
   if (process.env.STRUCTURED_TRANSPORT !== 'off' && isChannelConnected(session.id)) {
     queueChannelEvent(session.id, {
@@ -108,8 +138,8 @@ export async function sendToSession(
     return true;
   }
 
-  const sentViaWorker = await sendInputToWorker(session, message);
-  if (sentViaWorker) {
+  const workerResult = await sendInputToWorker(session, message);
+  if (workerResult.ok) {
     updateSessionRuntime(session.id, {
       transportKind: 'pty_fallback',
       transportState: 'degraded',
@@ -119,8 +149,11 @@ export async function sendToSession(
     return true;
   }
 
+  if (turnStarted) {
+    endSessionTurn(session.id);
+  }
   stopTypingIndicator(session.id);
-  logger.warn(`No transport available for ${session.name}`);
+  logger.warn(`No transport available for ${session.name}${workerResult.error ? `: ${workerResult.error}` : ''}`);
   return false;
 }
 
@@ -154,6 +187,7 @@ export async function handleChannelReply(
   discordClient: Client
 ): Promise<void> {
   stopTypingIndicator(sessionId);
+  endSessionTurn(sessionId);
 
   const session = getSession(sessionId);
   if (!session) return;
@@ -199,6 +233,7 @@ export async function handleWorkerNotice(
   discordClient: Client
 ): Promise<void> {
   stopTypingIndicator(sessionId);
+  endSessionTurn(sessionId);
 
   const session = getSession(sessionId);
   if (!session) return;

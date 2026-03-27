@@ -1,6 +1,6 @@
-# Conductor
+# CC Conductor
 
-Conductor turns a Discord server into a multi-session Claude Code control plane. Each session gets its own Discord channel, a detached worker process, a persistent Claude Code session, and a structured Discord transport through Claude Channels.
+CC Conductor turns a Discord server into a multi-session Claude Code control plane. Each session gets its own Discord channel, a detached worker process, a persistent Claude Code session, and a structured Discord transport through Claude Channels.
 
 ## Visual Overview
 
@@ -8,7 +8,7 @@ Conductor turns a Discord server into a multi-session Claude Code control plane.
 %%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
 flowchart LR
     User[Discord User] --> Orch[Orchestrator Channel]
-    Orch --> Daemon[Conductor Daemon]
+    Orch --> Daemon[CC Conductor Daemon]
     Daemon --> DB[(SQLite State)]
     Daemon --> Worker[Detached Session Worker]
     Worker --> Claude[Claude Code CLI]
@@ -42,8 +42,11 @@ The supported path is:
 - detached session workers
 - `node-pty` for the terminal backend
 - a custom Node MCP channel server for Discord transport
+- configurable agent backends through `DEFAULT_AGENT_BACKEND`, `ENABLED_AGENT_BACKENDS`, and `CODEX_BIN`
 
-`tmux` is legacy and optional. Bun is optional and not required for the supported path.
+`tmux` is legacy and optional. The legacy plugin directory is npm-managed and optional.
+
+Compatibility note: the repository/package slug remains `cc-conductor`, and the existing `CONDUCTOR_*` environment variables keep their names.
 
 ## Install
 
@@ -79,7 +82,7 @@ See [SETUP.md](/mnt/d/Repositories/cc-conductor/SETUP.md) and [docs/deployment.m
 
 ## Upgrade Notes
 
-- Conductor now fails fast if `CLAUDE_BIN` resolves to Claude Code older than `2.1.80`.
+- CC Conductor now fails fast if `CLAUDE_BIN` resolves to Claude Code older than `2.1.80`.
 - If you are upgrading from the legacy tmux-backed DB schema and startup reports `sessions.tmux_session` is still `NOT NULL`, delete `data/conductor.db`, `data/conductor.db-shm`, and `data/conductor.db-wal`, then restart.
 
 ## Commands
@@ -101,7 +104,7 @@ Set `COMMAND_PREFIX` to change the control-plane prefix. The examples below use 
 
 ## Architecture
 
-Conductor now has three runtime roles:
+CC Conductor now has three runtime roles:
 
 - The main daemon owns the Discord bot, REST API, DB, routing, reconciliation, and health monitoring.
 - Each session runs in a detached worker that owns the persistent Claude Code process.
@@ -126,20 +129,23 @@ CHECKPOINT_DISCORD_MESSAGES=50
 AUTO_RESUME_ON_START=false
 ARCHIVE_ON_KILL=true
 CLAUDE_BIN=claude
+DEFAULT_AGENT_BACKEND=claude
+ENABLED_AGENT_BACKENDS=claude
+CODEX_BIN=codex
 INDICATOR_MODE=typing
 ```
 
 ## Session Resumability
 
-Conductor handles three recovery paths:
+CC Conductor handles three recovery paths:
 
 1. Daemon restart: workers keep running and reconnect to the restarted daemon.
 2. Worker or Claude exit: the session is marked interrupted and can be resumed.
-3. Full machine restart: `<prefix>resume` first attempts Claude CLI resume, then falls back to Conductor checkpoint injection.
+3. Full machine restart: `<prefix>resume` first attempts Claude CLI resume, then falls back to CC Conductor checkpoint injection.
 
 ## Notes
 
 - The supported structured transport currently depends on Claude Channels research-preview behavior and the development channel flag.
-- Conductor keeps a single Discord gateway client in the daemon. Session workers and channel servers talk back to it over localhost-authenticated internal routes.
+- CC Conductor keeps a single Discord gateway client in the daemon. Session workers and channel servers talk back to it over localhost-authenticated internal routes.
 - Core runtime code is backend-neutral; platform-specific deployment remains outside the runtime.
 - Worker startup diagnostics are written under `data/sessions/<sessionId>/`.

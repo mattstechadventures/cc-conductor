@@ -4,6 +4,24 @@ import os from 'os';
 import path from 'path';
 import { ChannelType, Client, TextChannel } from 'discord.js';
 import { nanoid } from 'nanoid';
+import { buildArchivedChannelName, findArchiveCategory } from './channel-archive.js';
+import {
+  formatInactiveBackendSummary,
+  getBackendDisplayName,
+  getDefaultAgentBackend,
+  getSessionBackendSummary,
+  isAgentBackend,
+  isBackendEnabled,
+} from './agent-backends.js';
+import { getRuntimeBuildId } from './runtime-build.js';
+import { getReadyHeartbeatTransition } from './worker-heartbeat.js';
+import { getWorkerBuildCompatibilityIssue } from './worker-runtime-compat.js';
+import {
+  formatRuntimeBuildIdForLog,
+  isDiscordMissingPermissionsError,
+  requestWorkerTerminate,
+  terminateWorkerProcess,
+} from './worker-control.js';
 import {
   disconnectChannel,
   handleChannelReaction,
@@ -17,18 +35,21 @@ import {
   updateWorkerHeartbeat,
 } from './bridge.js';
 import { logger } from './logger.js';
-import { resumeSession } from './resume.js';
+import { resumeSession, restartSession, switchSessionBackend } from './resume.js';
 import {
   createSession,
   deleteSession,
   getActiveSessions,
   getAllSessions,
   getSession,
+  getSessionBackend,
   getSessionByName,
   getSessionInternalAuth,
+  markBackendActive,
   markInterrupted,
   updateSessionActivity,
   updateSessionAdditionalDirs,
+  updateSessionBackend,
   updateSessionRuntime,
   updateSessionStatus,
 } from './sessions.js';
@@ -36,21 +57,24 @@ import { managedPathsEqual, normalizeManagedPath, resolveUserPath } from './stat
 import type {
   AddDirRequest,
   AddDirResult,
+  AgentBackend,
   ChannelReactionPayload,
   ChannelReplyPayload,
   DaemonResponse,
   Session,
   SpawnRequest,
+  SwitchBackendRequest,
+  SwitchBackendResult,
   WorkerHeartbeat,
   WorkerRegistration,
 } from './types.js';
-import { getWorkerRuntime } from './runtime-state.js';
+import { clearWorkerRuntime, endSessionTurn, getWorkerRuntime, isSessionTurnLocked } from './runtime-state.js';
 import { spawnSessionWorker, terminateSessionWorker } from './worker-manager.js';
 import { formatCommand } from './command-prefix.js';
-import { restartSession } from './resume.js';
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
 const WORKER_STALE_MS = 20_000;
+const runtimeBuildId = process.env.CONDUCTOR_RUNTIME_BUILD_ID || getRuntimeBuildId();
 
 let healthMonitorTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -87,6 +111,12 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         return;
       }
 
+      const requestedBackend = body.agentBackend || getDefaultAgentBackend();
+      if (!isBackendEnabled(requestedBackend)) {
+        res.json({ ok: false, error: `Backend "${requestedBackend}" is not enabled` } as DaemonResponse);
+        return;
+      }
+
       const defaultWorkDir = resolveUserPath(process.env.DEFAULT_WORK_DIR || path.join(os.homedir(), 'projects'));
       const projectDir = body.projectDir
         ? resolveUserPath(body.projectDir)
@@ -106,10 +136,12 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         name: body.name,
         type: ChannelType.GuildText,
         parent: getConductorCategory(),
-        topic: `Claude Code session: ${body.name} | Dir: ${projectDir}`,
+        topic: `CC Conductor session: ${body.name} | Backend: ${requestedBackend} | Dir: ${projectDir}`,
       });
 
-      const terminalBackend = process.env.TERMINAL_BACKEND === 'tmux' ? 'tmux' : 'pty';
+      const terminalBackend = requestedBackend === 'claude'
+        ? (process.env.TERMINAL_BACKEND === 'tmux' ? 'tmux' : 'pty')
+        : 'none';
       const claudeSessionName = body.name;
       const session: Session = {
         id: nanoid(8),
@@ -130,9 +162,13 @@ export function createDaemon(deps: DaemonDeps): express.Express {
         indicatorMode: null,
         workerId: null,
         terminalBackend,
-        terminalHandle: terminalBackend === 'tmux' ? `conductor-${body.name}` : null,
-        transportKind: process.env.STRUCTURED_TRANSPORT === 'off' ? 'pty_fallback' : 'channel',
+        terminalHandle: requestedBackend === 'claude' && terminalBackend === 'tmux' ? `conductor-${body.name}` : null,
+        transportKind: requestedBackend === 'codex'
+          ? 'worker_http'
+          : (process.env.STRUCTURED_TRANSPORT === 'off' ? 'pty_fallback' : 'channel'),
         transportState: 'disconnected',
+        activeBackend: requestedBackend,
+        backendStates: [],
         claudeSessionName,
         claudeResumeRef: claudeSessionName,
         workerStatus: 'starting',
@@ -156,6 +192,7 @@ export function createDaemon(deps: DaemonDeps): express.Express {
       }
 
       const updated = getSession(session.id)!;
+      markBackendActive(session.id, requestedBackend);
       updateSessionStatus(session.id, 'active', updated.pid);
 
       res.json({ ok: true, data: getSession(session.id)! } as DaemonResponse<Session>);
@@ -248,6 +285,38 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
   });
 
+  app.post('/sessions/:id/backend', async (req, res) => {
+    try {
+      const session = getSession(req.params.id);
+      if (!session) {
+        res.json({ ok: false, error: 'Session not found' } as DaemonResponse);
+        return;
+      }
+
+      if (isSessionTurnLocked(session.id)) {
+        res.json({ ok: false, error: 'A turn is still in progress. Retry after the current turn finishes.' } as DaemonResponse);
+        return;
+      }
+
+      const body = req.body as SwitchBackendRequest;
+      if (!body.backend || !isAgentBackend(body.backend)) {
+        res.json({ ok: false, error: 'backend must be claude or codex' } as DaemonResponse);
+        return;
+      }
+
+      if (!isBackendEnabled(body.backend)) {
+        res.json({ ok: false, error: `Backend "${body.backend}" is not enabled` } as DaemonResponse);
+        return;
+      }
+
+      const result = await switchSessionBackend(session, body.backend, discordClient);
+      res.json({ ok: true, data: result } as DaemonResponse<SwitchBackendResult>);
+    } catch (err: any) {
+      logger.error(`Backend switch failed: ${err.message}`);
+      res.json({ ok: false, error: err.message } as DaemonResponse);
+    }
+  });
+
   app.post('/sessions/:id/add-dir', async (req, res) => {
     try {
       const session = getSession(req.params.id);
@@ -322,6 +391,13 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
 
     const payload = req.body as WorkerRegistration;
+    const compatibilityIssue = getWorkerBuildCompatibilityIssue(runtimeBuildId, payload);
+    if (compatibilityIssue) {
+      void interruptStaleWorkerSession(session.id, payload, compatibilityIssue, discordClient);
+      res.status(409).json({ ok: false, error: 'Worker is running stale CC Conductor code' });
+      return;
+    }
+
     registerWorker(session.id, payload);
     updateSessionRuntime(session.id, {
       workerId: payload.workerId,
@@ -341,6 +417,13 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
 
     const payload = req.body as WorkerHeartbeat;
+    const compatibilityIssue = getWorkerBuildCompatibilityIssue(runtimeBuildId, payload);
+    if (compatibilityIssue) {
+      void interruptStaleWorkerSession(session.id, payload, compatibilityIssue, discordClient);
+      res.status(409).json({ ok: false, error: 'Worker is running stale CC Conductor code' });
+      return;
+    }
+
     updateWorkerHeartbeat(session.id, payload);
     updateSessionRuntime(session.id, {
       workerId: payload.workerId,
@@ -352,16 +435,25 @@ export function createDaemon(deps: DaemonDeps): express.Express {
 
     if (payload.workerStatus === 'ready') {
       const latest = getSession(session.id);
-      if (latest && latest.status === 'starting') {
+      const transition = latest ? getReadyHeartbeatTransition(latest, payload) : null;
+      if (latest && transition) {
+        if (transition.shouldMarkBackendActive) {
+          markBackendActive(session.id, latest.activeBackend);
+        }
+        if (Object.keys(transition.runtimePatch).length > 0) {
+          updateSessionRuntime(session.id, transition.runtimePatch);
+        }
         updateSessionStatus(session.id, 'active', payload.claudePid);
-        await postSessionReadyNotice(session.id, discordClient);
-      } else if (latest && latest.status === 'interrupted') {
-        updateSessionStatus(session.id, 'active', payload.claudePid);
-        await postReconnectedNotice(session.id, discordClient);
+        if (transition.notice === 'ready') {
+          await postSessionReadyNotice(session.id, discordClient);
+        } else {
+          await postReconnectedNotice(session.id, discordClient);
+        }
       }
     } else if (payload.workerStatus === 'exited') {
       const latest = getSession(session.id);
       if (latest && latest.status !== 'dead' && latest.status !== 'interrupted') {
+        endSessionTurn(session.id);
         markInterrupted(session.id);
         await postInterruptedNotice(session.id, discordClient);
       }
@@ -384,6 +476,36 @@ export function createDaemon(deps: DaemonDeps): express.Express {
     }
 
     await handleWorkerNotice(session.id, payload.message, discordClient);
+    res.json({ ok: true });
+  });
+
+  app.post('/internal/sessions/:id/worker/backend-state', async (req, res) => {
+    const session = getSession(req.params.id);
+    if (!session || !authorizeInternal(req, session.id, 'worker')) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const payload = req.body as {
+      backend?: AgentBackend;
+      nativeSessionName?: string | null;
+      nativeResumeRef?: string | null;
+      state?: 'never_started' | 'active' | 'parked';
+      lastActiveAt?: number | null;
+      lastHandoffAt?: number | null;
+    };
+    if (!payload.backend || !isAgentBackend(payload.backend)) {
+      res.status(400).json({ ok: false, error: 'backend is required' });
+      return;
+    }
+
+    updateSessionBackend(session.id, payload.backend, {
+      nativeSessionName: payload.nativeSessionName,
+      nativeResumeRef: payload.nativeResumeRef,
+      state: payload.state,
+      lastActiveAt: payload.lastActiveAt,
+      lastHandoffAt: payload.lastHandoffAt,
+    });
     res.json({ ok: true });
   });
 
@@ -468,8 +590,24 @@ export function startHealthMonitor(discordClient: Client): void {
       }
 
       const worker = getWorkerRuntime(session.id);
-      if (!worker || Date.now() - worker.lastHeartbeatAt > WORKER_STALE_MS) {
-        logger.warn(`Session ${session.name}: worker stale or missing`);
+      const compatibilityIssue = worker ? getWorkerBuildCompatibilityIssue(runtimeBuildId, worker) : null;
+      if (!worker || compatibilityIssue || Date.now() - worker.lastHeartbeatAt > WORKER_STALE_MS) {
+        if (worker && compatibilityIssue) {
+          logger.warn(
+            `Session ${session.name}: worker runtime build mismatch; daemon=${formatRuntimeBuildIdForLog(runtimeBuildId)} worker=${formatRuntimeBuildIdForLog(worker.runtimeBuildId)}`
+          );
+          clearWorkerRuntime(session.id);
+          updateSessionRuntime(session.id, {
+            workerId: null,
+            terminalHandle: null,
+            transportState: 'disconnected',
+            workerStatus: 'stopped',
+            pid: null,
+          });
+        } else {
+          logger.warn(`Session ${session.name}: worker stale or missing`);
+        }
+        endSessionTurn(session.id);
         markInterrupted(session.id);
         await postInterruptedNotice(session.id, discordClient);
         continue;
@@ -489,6 +627,7 @@ export function startHealthMonitor(discordClient: Client): void {
           }
 
           await terminateSessionWorker(session);
+          endSessionTurn(session.id);
           updateSessionStatus(session.id, 'dead', null);
           updateSessionRuntime(session.id, {
             transportState: 'disconnected',
@@ -511,17 +650,18 @@ async function handleSessionChannelDeletion(session: Session, discordClient: Cli
   const archiveOnKill = process.env.ARCHIVE_ON_KILL !== 'false';
   try {
     const guild = discordClient.guilds.cache.get(process.env.DISCORD_GUILD_ID!);
-    const channel = guild?.channels.cache.get(session.discordChannelId);
+    const channel = guild
+      ? await guild.channels.fetch(session.discordChannelId).catch(() => null)
+      : null;
     if (!channel) return;
 
     if (archiveOnKill) {
       const textChannel = channel as TextChannel;
-      await textChannel.setName(`archive-${session.name}`);
+      await textChannel.setName(buildArchivedChannelName(session.name));
       await textChannel.send(`⚠ Session **${session.name}** has been killed and archived.`);
 
-      let archiveCategory = guild?.channels.cache.find(
-        entry => entry.name === 'Archive' && entry.type === ChannelType.GuildCategory
-      );
+      const guildChannels = guild ? await guild.channels.fetch() : null;
+      let archiveCategory = guildChannels ? findArchiveCategory(guildChannels.values()) : null;
       if (!archiveCategory && guild) {
         archiveCategory = await guild.channels.create({
           name: 'Archive',
@@ -529,13 +669,17 @@ async function handleSessionChannelDeletion(session: Session, discordClient: Cli
         });
       }
       if (archiveCategory) {
-        await textChannel.setParent(archiveCategory.id);
+        await textChannel.setParent(archiveCategory.id, { lockPermissions: false });
       }
       return;
     }
 
     await channel.delete();
   } catch (err: any) {
+    if (isDiscordMissingPermissionsError(err)) {
+      logger.warn(`Discord channel cleanup skipped for ${session.name}: missing permissions`);
+      return;
+    }
     logger.error(`Failed to handle Discord channel for ${session.name}: ${err.message}`);
   }
 }
@@ -565,7 +709,10 @@ async function postSessionReadyNotice(sessionId: string, discordClient: Client):
   try {
     const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
     if (channel) {
-      await channel.send(`✓ Session **${session.name}** is live. Claude Code is running in \`${session.projectDir}\`.`);
+      await channel.send(
+        `✓ Session **${session.name}** is live on **${getBackendDisplayName(session.activeBackend)}** in \`${session.projectDir}\`.` +
+        ` ${formatInactiveBackendSummary(session)}.`
+      );
     }
   } catch {
     // best effort
@@ -579,7 +726,10 @@ async function postInterruptedNotice(sessionId: string, discordClient: Client): 
   try {
     const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
     if (channel) {
-      await channel.send(`⚠ Session **${session.name}** has been interrupted. Use \`${formatCommand(`resume ${session.name}`)}\` in #${orchestratorName} to recover.`);
+      await channel.send(
+        `⚠ Session **${session.name}** on **${getBackendDisplayName(session.activeBackend)}** has been interrupted. ` +
+        `Use \`${formatCommand(`resume ${session.name}`)}\` in #${orchestratorName} to recover.`
+      );
     }
   } catch {
     // best effort
@@ -592,7 +742,75 @@ async function postReconnectedNotice(sessionId: string, discordClient: Client): 
   try {
     const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
     if (channel) {
-      await channel.send(`↺ Session **${session.name}** reconnected.`);
+      await channel.send(
+        `↺ Session **${session.name}** reconnected on **${getBackendDisplayName(session.activeBackend)}**.` +
+        ` ${formatInactiveBackendSummary(session)}.`
+      );
+    }
+  } catch {
+    // best effort
+  }
+}
+
+async function interruptStaleWorkerSession(
+  sessionId: string,
+  payload: Pick<WorkerRegistration, 'workerId' | 'runtimeBuildId' | 'port' | 'pid'>,
+  compatibilityIssue: 'missing-runtime-build-id' | 'runtime-build-mismatch',
+  discordClient: Client
+): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+
+  const shouldNotify = session.status !== 'interrupted' || session.workerId !== null;
+  if (shouldNotify) {
+    logger.warn(
+      `Rejecting stale worker for ${session.name}: daemon=${formatRuntimeBuildIdForLog(runtimeBuildId)} worker=${formatRuntimeBuildIdForLog(payload.runtimeBuildId)} issue=${compatibilityIssue}`
+    );
+  }
+
+  clearWorkerRuntime(session.id);
+  endSessionTurn(session.id);
+  markInterrupted(session.id);
+  updateSessionRuntime(session.id, {
+    workerId: null,
+    terminalHandle: null,
+    transportState: 'disconnected',
+    workerStatus: 'stopped',
+    pid: null,
+  });
+
+  if (shouldNotify) {
+    await postStaleWorkerInterruptedNotice(session.id, discordClient);
+  }
+
+  await terminateWorkerAtPort(session.id, payload.port, payload.pid);
+}
+
+async function terminateWorkerAtPort(sessionId: string, port: number, pid: number): Promise<void> {
+  const auth = getSessionInternalAuth(sessionId);
+  let terminated = false;
+
+  if (auth?.workerToken && Number.isFinite(port) && port > 0) {
+    const result = await requestWorkerTerminate(port, auth.workerToken);
+    terminated = result.ok;
+  }
+
+  if (!terminated) {
+    terminateWorkerProcess(pid);
+  }
+}
+
+async function postStaleWorkerInterruptedNotice(sessionId: string, discordClient: Client): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+  const orchestratorName = process.env.ORCHESTRATOR_CHANNEL_NAME || 'orchestrator';
+  try {
+    const channel = await discordClient.channels.fetch(session.discordChannelId) as TextChannel | null;
+    if (channel) {
+      await channel.send(
+        `⚠ Session **${session.name}** was interrupted because its worker is running stale CC Conductor code. ` +
+        `Use \`${formatCommand(`resume ${session.name}`)}\` in #${orchestratorName} to start a fresh worker.`
+      );
     }
   } catch {
     // best effort

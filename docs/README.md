@@ -1,11 +1,11 @@
-# Conductor Docs
+# CC Conductor Docs
 
 ## Visual Overview
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables': {'background':'#ffffff','primaryColor':'#E8F1FF','primaryTextColor':'#102A43','primaryBorderColor':'#2F6FED','lineColor':'#52606D','secondaryColor':'#E6FCF5','tertiaryColor':'#FFF4E6','fontFamily':'Segoe UI, Arial, sans-serif'}}}%%
 flowchart TD
-    Docs[Conductor Docs] --> Runtime[Architecture and Bridge]
+    Docs[CC Conductor Docs] --> Runtime[Architecture and Bridge]
     Docs --> Lifecycle[Lifecycle and Recovery]
     Docs --> Ops[Setup Deployment Config]
     Docs --> Interfaces[Commands API Typing]
@@ -35,12 +35,15 @@ flowchart TD
 
 - [Architecture](./architecture.md): daemon, session worker, and channel server roles
 - [Commands](./commands.md): Discord control-plane commands and prefix settings
+- Session notices and `/list` describe the non-active backend as a standby backend in plain language
 - Sessions can now gain extra allowed directories through `<prefix>add-dir`, without changing their base `projectDir`
 - Startup failures in Discord are shortened to fit Discord message limits and point to worker diagnostics under `data/sessions/<sessionId>/`
+- Stale worker cleanup falls back to local PID termination, and `/kill` keeps session shutdown best-effort even if Discord channel cleanup permissions are missing
+- Archived session channels are moved into the `Archive` category when `ARCHIVE_ON_KILL=true`
 - [Bridge](./bridge.md): structured Discord transport and PTY fallback
 - [Session Lifecycle](./session-lifecycle.md): spawn, active, interruption, kill
 - [Resume & Recovery](./resume-and-recovery.md): reconnect, Claude resume, checkpoint fallback
-- [Configuration](./configuration.md): environment variables
+- [Configuration](./configuration.md): environment variables and backend selection
 - [Deployment](./deployment.md): service setup notes
 - [Checkpoints](./checkpoints.md): what gets persisted for recovery
 - [Health Monitoring](./health-monitoring.md): worker heartbeat and idle handling

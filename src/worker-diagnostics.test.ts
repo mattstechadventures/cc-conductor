@@ -27,9 +27,11 @@ test('worker timeout diagnostics surface lastError and log paths', () => {
     const state: WorkerStateFile = {
       sessionId,
       workerId: 'worker-123',
+      runtimeBuildId: 'build-123',
       port: 30125,
       pid: 1234,
       claudePid: null,
+      activeBackend: 'claude',
       terminalBackend: 'pty',
       terminalHandle: null,
       workerStatus: 'exited',
@@ -69,9 +71,11 @@ test('worker timeout diagnostics stay compact when terminal output is huge', () 
     const state: WorkerStateFile = {
       sessionId,
       workerId: 'worker-456',
+      runtimeBuildId: 'build-456',
       port: 30125,
       pid: 1234,
       claudePid: null,
+      activeBackend: 'claude',
       terminalBackend: 'pty',
       terminalHandle: null,
       workerStatus: 'exited',

@@ -3,8 +3,9 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { nanoid } from 'nanoid';
 import { registerSessionChannelServer, unregisterSessionChannelServer } from './claude-mcp.js';
-import { getSessionInternalAuth, setSessionInternalAuth, updateSessionRuntime } from './sessions.js';
-import { waitForWorkerStatus } from './runtime-state.js';
+import { getSessionBackend, getSessionInternalAuth, setSessionInternalAuth, updateSessionRuntime } from './sessions.js';
+import { clearWorkerRuntime, waitForWorkerStatus } from './runtime-state.js';
+import { getRuntimeBuildId } from './runtime-build.js';
 import {
   getRepoRoot,
   getWorkerStatePath,
@@ -14,10 +15,213 @@ import {
   writeJsonFile,
 } from './state.js';
 import { logger } from './logger.js';
+import { readWorkerControlState, requestWorkerTerminate, terminateWorkerProcess } from './worker-control.js';
 import type { Session, WorkerLaunchMode, WorkerStartResult, WorkerStateFile } from './types.js';
 import { buildWorkerStartupFailure } from './worker-diagnostics.js';
 
 const WORKER_READY_TIMEOUT_MS = 30_000;
+const runtimeBuildId = process.env.CONDUCTOR_RUNTIME_BUILD_ID || getRuntimeBuildId();
+
+export interface WorkerInputResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface WorkerLaunchPlanInput {
+  session: Session;
+  options: {
+    mode: WorkerLaunchMode;
+    resumePromptPath?: string | null;
+  };
+  claudeBackend?: ReturnType<typeof getSessionBackend> | null;
+  codexBackend?: ReturnType<typeof getSessionBackend> | null;
+  workerId: string;
+  workerToken: string;
+  channelToken: string;
+  runtimeBuildId?: string;
+}
+
+export interface WorkerLaunchPlan {
+  workerId: string;
+  workerToken: string;
+  channelToken: string;
+  runtimeBuildId: string;
+  daemonUrl: string;
+  structuredTransport: boolean;
+  workerStatePath: string;
+  stdoutLogPath: string;
+  stderrLogPath: string;
+  terminalLogPath: string;
+  terminalBackend: Session['terminalBackend'];
+  workerEntry: string;
+  workerState: WorkerStateFile;
+  launchEnv: NodeJS.ProcessEnv;
+}
+
+export function buildWorkerLaunchPlan(input: WorkerLaunchPlanInput): WorkerLaunchPlan {
+  const runtimeBuildId = input.runtimeBuildId || process.env.CONDUCTOR_RUNTIME_BUILD_ID || getRuntimeBuildId();
+  const daemonUrl = `http://127.0.0.1:${process.env.CONDUCTOR_API_PORT || '7842'}`;
+  const structuredTransport = input.session.activeBackend === 'claude' && process.env.STRUCTURED_TRANSPORT !== 'off';
+  const workerStatePath = getWorkerStatePath(input.session.id);
+  const stdoutLogPath = getWorkerStdoutLogPath(input.session.id);
+  const stderrLogPath = getWorkerStderrLogPath(input.session.id);
+  const terminalLogPath = getWorkerTerminalLogPath(input.session.id);
+  const terminalBackend = input.session.activeBackend === 'claude'
+    ? (process.env.TERMINAL_BACKEND === 'tmux' ? 'tmux' : 'pty')
+    : 'none';
+  const workerEntry = input.session.activeBackend === 'claude'
+    ? `${getRepoRoot()}/src/worker.ts`
+    : `${getRepoRoot()}/src/codex-worker.ts`;
+
+  const launchEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    CONDUCTOR_SESSION_ID: input.session.id,
+    CONDUCTOR_WORKER_ID: input.workerId,
+    CONDUCTOR_WORKER_TOKEN: input.workerToken,
+    CONDUCTOR_CHANNEL_TOKEN: input.channelToken,
+    CONDUCTOR_DAEMON_URL: daemonUrl,
+    CONDUCTOR_WORKER_STATE_PATH: workerStatePath,
+    CONDUCTOR_WORKER_STDOUT_LOG_PATH: stdoutLogPath,
+    CONDUCTOR_WORKER_STDERR_LOG_PATH: stderrLogPath,
+    CONDUCTOR_TERMINAL_LOG_PATH: terminalLogPath,
+    CONDUCTOR_WORKER_MODE: input.options.mode,
+    CONDUCTOR_STRUCTURED_TRANSPORT: structuredTransport ? 'channel' : 'off',
+    CONDUCTOR_RESUME_PROMPT_PATH: input.options.resumePromptPath || '',
+    CONDUCTOR_SESSION_NAME: input.session.name,
+    CONDUCTOR_PROJECT_DIR: input.session.projectDir,
+    CONDUCTOR_ADDITIONAL_DIRS_JSON: JSON.stringify(input.session.additionalDirs),
+    CONDUCTOR_ACTIVE_BACKEND: input.session.activeBackend,
+    CONDUCTOR_CLAUDE_SESSION_NAME: input.claudeBackend?.nativeSessionName || input.session.claudeSessionName,
+    CONDUCTOR_CLAUDE_RESUME_REF: input.claudeBackend?.nativeResumeRef || input.session.claudeResumeRef || input.session.claudeSessionName,
+    CONDUCTOR_CODEX_SESSION_NAME: input.codexBackend?.nativeSessionName || input.session.name,
+    CONDUCTOR_CODEX_RESUME_REF: input.codexBackend?.nativeResumeRef || '',
+    CONDUCTOR_TERMINAL_BACKEND: terminalBackend,
+    CONDUCTOR_RUNTIME_BUILD_ID: runtimeBuildId,
+  };
+
+  return {
+    workerId: input.workerId,
+    workerToken: input.workerToken,
+    channelToken: input.channelToken,
+    runtimeBuildId,
+    daemonUrl,
+    structuredTransport,
+    workerStatePath,
+    stdoutLogPath,
+    stderrLogPath,
+    terminalLogPath,
+    terminalBackend,
+    workerEntry,
+    workerState: {
+      sessionId: input.session.id,
+      workerId: input.workerId,
+      runtimeBuildId,
+      port: null,
+      pid: null,
+      claudePid: null,
+      activeBackend: input.session.activeBackend,
+      terminalBackend,
+      terminalHandle: null,
+      workerStatus: 'starting',
+      ready: false,
+      updatedAt: Date.now(),
+      stdoutLogPath,
+      stderrLogPath,
+      terminalLogPath,
+      lastError: null,
+      exitCode: null,
+    },
+    launchEnv,
+  };
+}
+
+export interface WorkerInputContext {
+  auth: ReturnType<typeof getSessionInternalAuth>;
+  controlState: ReturnType<typeof readWorkerControlState>;
+  fetchImpl?: typeof fetch;
+}
+
+export async function sendInputToWorkerWithContext(
+  message: string,
+  context: WorkerInputContext
+): Promise<WorkerInputResult> {
+  if (!context.auth?.workerToken || !context.controlState.port) {
+    return { ok: false, error: 'No worker transport is available.' };
+  }
+
+  try {
+    const res = await (context.fetchImpl || fetch)(`http://127.0.0.1:${context.controlState.port}/input`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${context.auth.workerToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message }),
+    });
+    if (res.ok) {
+      return { ok: true };
+    }
+
+    let payload: { error?: string } | null = null;
+    try {
+      payload = await res.json() as { error?: string };
+    } catch {
+      payload = null;
+    }
+
+    return {
+      ok: false,
+      error: buildWorkerInputFailure(res.status, payload),
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: `Worker input request failed: ${err.message}`,
+    };
+  }
+}
+
+export interface WorkerTerminationContext {
+  auth: ReturnType<typeof getSessionInternalAuth>;
+  controlState: ReturnType<typeof readWorkerControlState>;
+  requestTerminate?: typeof requestWorkerTerminate;
+  terminateProcess?: typeof terminateWorkerProcess;
+  clearRuntime?: (sessionId: string) => void;
+  cleanupRegisteredChannelServer?: (session: Session, structuredTransport: boolean) => void;
+  logger?: Pick<typeof logger, 'warn'>;
+}
+
+export async function terminateSessionWorkerWithContext(
+  session: Session,
+  context: WorkerTerminationContext
+): Promise<void> {
+  let terminateError: string | null = null;
+
+  if (context.auth?.workerToken && context.controlState.port) {
+    const terminate = context.requestTerminate || requestWorkerTerminate;
+    const result = await terminate(context.controlState.port, context.auth.workerToken);
+    if (!result.ok) {
+      terminateError = result.error || 'unknown error';
+    }
+  }
+
+  if (terminateError || !context.auth?.workerToken || !context.controlState.port) {
+    const terminateProcess = context.terminateProcess || terminateWorkerProcess;
+    const pidResult = terminateProcess(context.controlState.pid);
+    if (!pidResult.ok && terminateError) {
+      (context.logger || logger).warn(`Failed to terminate worker for ${session.name}: ${terminateError}`);
+    } else if (!pidResult.ok && !terminateError && context.controlState.pid) {
+      (context.logger || logger).warn(`Failed to terminate worker for ${session.name}: ${pidResult.error}`);
+    }
+  }
+
+  if (context.clearRuntime) {
+    context.clearRuntime(session.id);
+  }
+  if (context.cleanupRegisteredChannelServer) {
+    context.cleanupRegisteredChannelServer(session, session.transportKind === 'channel');
+  }
+}
 
 export async function spawnSessionWorker(
   session: Session,
@@ -29,69 +233,61 @@ export async function spawnSessionWorker(
   const workerId = nanoid(12);
   const workerToken = nanoid(32);
   const channelToken = nanoid(32);
-  const daemonUrl = `http://127.0.0.1:${process.env.CONDUCTOR_API_PORT || '7842'}`;
-  const structuredTransport = process.env.STRUCTURED_TRANSPORT !== 'off';
-  const workerStatePath = getWorkerStatePath(session.id);
-  const stdoutLogPath = getWorkerStdoutLogPath(session.id);
-  const stderrLogPath = getWorkerStderrLogPath(session.id);
-  const terminalLogPath = getWorkerTerminalLogPath(session.id);
-  const terminalBackend = process.env.TERMINAL_BACKEND === 'tmux' ? 'tmux' : 'pty';
-
-  setSessionInternalAuth(session.id, {
+  const claudeBackend = getSessionBackend(session.id, 'claude');
+  const codexBackend = getSessionBackend(session.id, 'codex');
+  const plan = buildWorkerLaunchPlan({
+    session,
+    options,
+    claudeBackend,
+    codexBackend,
+    workerId,
     workerToken,
     channelToken,
+    runtimeBuildId,
+  });
+
+  setSessionInternalAuth(session.id, {
+    workerToken: plan.workerToken,
+    channelToken: plan.channelToken,
   });
 
   updateSessionRuntime(session.id, {
-    workerId,
-    terminalBackend,
-    terminalHandle: session.terminalHandle,
-    transportKind: structuredTransport ? 'channel' : 'pty_fallback',
+    workerId: plan.workerId,
+    terminalBackend: plan.terminalBackend,
+    terminalHandle: session.activeBackend === 'claude' ? session.terminalHandle : null,
+    transportKind: session.activeBackend === 'codex'
+      ? 'worker_http'
+      : (plan.structuredTransport ? 'channel' : 'pty_fallback'),
     transportState: 'disconnected',
-    claudeSessionName: session.claudeSessionName,
-    claudeResumeRef: session.claudeResumeRef || session.claudeSessionName,
+    claudeSessionName: claudeBackend?.nativeSessionName || session.claudeSessionName,
+    claudeResumeRef: claudeBackend?.nativeResumeRef || session.claudeResumeRef || session.claudeSessionName,
     workerStatus: 'starting',
     pid: null,
   });
 
-  writeJsonFile(workerStatePath, {
-    sessionId: session.id,
-    workerId,
-    port: null,
-    pid: null,
-    claudePid: null,
-    terminalBackend,
-    terminalHandle: null,
-    workerStatus: 'starting',
-    ready: false,
-    updatedAt: Date.now(),
-    stdoutLogPath,
-    stderrLogPath,
-    terminalLogPath,
-    lastError: null,
-    exitCode: null,
-  } satisfies WorkerStateFile);
+  writeJsonFile(plan.workerStatePath, plan.workerState);
 
-  appendLaunchMarker(stdoutLogPath, workerId, options.mode);
-  appendLaunchMarker(stderrLogPath, workerId, options.mode);
-  appendLaunchMarker(terminalLogPath, workerId, options.mode);
+  appendLaunchMarker(plan.stdoutLogPath, plan.workerId, options.mode);
+  appendLaunchMarker(plan.stderrLogPath, plan.workerId, options.mode);
+  appendLaunchMarker(plan.terminalLogPath, plan.workerId, options.mode);
 
-  if (structuredTransport) {
+  if (plan.structuredTransport) {
     try {
       registerSessionChannelServer(session, {
-        daemonUrl,
-        channelToken,
+        daemonUrl: plan.daemonUrl,
+        channelToken: plan.channelToken,
         resumePromptPath: options.resumePromptPath || '',
       });
     } catch (err: any) {
       writeLaunchFailureState({
         sessionId: session.id,
-        workerId,
-        workerStatePath,
-        stdoutLogPath,
-        stderrLogPath,
-        terminalLogPath,
-        terminalBackend,
+        workerId: plan.workerId,
+        activeBackend: session.activeBackend,
+        workerStatePath: plan.workerStatePath,
+        stdoutLogPath: plan.stdoutLogPath,
+        stderrLogPath: plan.stderrLogPath,
+        terminalLogPath: plan.terminalLogPath,
+        terminalBackend: plan.terminalBackend,
         error: err.message,
       });
       return buildWorkerStartupFailure(session.id, `Worker for session ${session.name} failed to start`);
@@ -102,51 +298,32 @@ export async function spawnSessionWorker(
   let stdoutFd: number | null = null;
   let stderrFd: number | null = null;
   try {
-    stdoutFd = fs.openSync(stdoutLogPath, 'a');
-    stderrFd = fs.openSync(stderrLogPath, 'a');
+    stdoutFd = fs.openSync(plan.stdoutLogPath, 'a');
+    stderrFd = fs.openSync(plan.stderrLogPath, 'a');
     child = spawn(
       process.execPath,
-      ['--import', 'tsx', `${getRepoRoot()}/src/worker.ts`],
+      ['--import', 'tsx', plan.workerEntry],
       {
         cwd: getRepoRoot(),
         detached: true,
         stdio: ['ignore', stdoutFd, stderrFd],
         windowsHide: true,
-        env: {
-          ...process.env,
-          CONDUCTOR_SESSION_ID: session.id,
-          CONDUCTOR_WORKER_ID: workerId,
-          CONDUCTOR_WORKER_TOKEN: workerToken,
-          CONDUCTOR_CHANNEL_TOKEN: channelToken,
-          CONDUCTOR_DAEMON_URL: daemonUrl,
-          CONDUCTOR_WORKER_STATE_PATH: workerStatePath,
-          CONDUCTOR_WORKER_STDOUT_LOG_PATH: stdoutLogPath,
-          CONDUCTOR_WORKER_STDERR_LOG_PATH: stderrLogPath,
-          CONDUCTOR_TERMINAL_LOG_PATH: terminalLogPath,
-          CONDUCTOR_WORKER_MODE: options.mode,
-          CONDUCTOR_STRUCTURED_TRANSPORT: structuredTransport ? 'channel' : 'off',
-          CONDUCTOR_RESUME_PROMPT_PATH: options.resumePromptPath || '',
-          CONDUCTOR_SESSION_NAME: session.name,
-          CONDUCTOR_PROJECT_DIR: session.projectDir,
-          CONDUCTOR_ADDITIONAL_DIRS_JSON: JSON.stringify(session.additionalDirs),
-          CONDUCTOR_CLAUDE_SESSION_NAME: session.claudeSessionName,
-          CONDUCTOR_CLAUDE_RESUME_REF: session.claudeResumeRef || session.claudeSessionName,
-          CONDUCTOR_TERMINAL_BACKEND: terminalBackend,
-        },
+        env: plan.launchEnv,
       }
     );
   } catch (err: any) {
     writeLaunchFailureState({
       sessionId: session.id,
-      workerId,
-      workerStatePath,
-      stdoutLogPath,
-      stderrLogPath,
-      terminalLogPath,
-      terminalBackend,
+      workerId: plan.workerId,
+      activeBackend: session.activeBackend,
+      workerStatePath: plan.workerStatePath,
+      stdoutLogPath: plan.stdoutLogPath,
+      stderrLogPath: plan.stderrLogPath,
+      terminalLogPath: plan.terminalLogPath,
+      terminalBackend: plan.terminalBackend,
       error: `Failed to spawn detached worker: ${err.message}`,
     });
-    cleanupRegisteredChannelServer(session, structuredTransport);
+    cleanupRegisteredChannelServer(session, plan.structuredTransport);
     return buildWorkerStartupFailure(session.id, `Worker for session ${session.name} failed to start`);
   } finally {
     if (stdoutFd !== null) fs.closeSync(stdoutFd);
@@ -154,15 +331,15 @@ export async function spawnSessionWorker(
   }
 
   child.unref();
-  logger.info(`Spawned detached worker ${workerId} for session ${session.name}`);
+  logger.info(`Spawned detached worker ${plan.workerId} for session ${session.name}`);
 
   const ready = await waitForWorkerStatus(session.id, ['ready'], WORKER_READY_TIMEOUT_MS);
   if (ready) {
     return {
       ready: true,
-      stdoutLogPath,
-      stderrLogPath,
-      terminalLogPath,
+      stdoutLogPath: plan.stdoutLogPath,
+      stderrLogPath: plan.stderrLogPath,
+      terminalLogPath: plan.terminalLogPath,
     };
   }
 
@@ -172,64 +349,34 @@ export async function spawnSessionWorker(
   );
 }
 
-export async function sendInputToWorker(session: Session, message: string): Promise<boolean> {
+export async function sendInputToWorker(session: Session, message: string): Promise<WorkerInputResult> {
   const auth = getSessionInternalAuth(session.id);
-  const port = await readWorkerPort(session.id);
-  if (!auth?.workerToken || !port) return false;
+  const controlState = readWorkerControlState(session.id);
+  return await sendInputToWorkerWithContext(message, { auth, controlState });
+}
 
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/input`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${auth.workerToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ message }),
-    });
-    return res.ok;
-  } catch {
-    return false;
+export function buildWorkerInputFailure(
+  statusCode: number,
+  payload?: { error?: string } | null
+): string {
+  if (payload?.error) {
+    return payload.error;
   }
+  return `Worker input request failed with HTTP ${statusCode}.`;
 }
 
 export async function terminateSessionWorker(session: Session): Promise<void> {
   const auth = getSessionInternalAuth(session.id);
-  const port = await readWorkerPort(session.id);
-  if (!auth?.workerToken || !port) {
-    clearStaleWorkerRuntime(session.id);
-    cleanupRegisteredChannelServer(session, session.transportKind === 'channel');
-    return;
-  }
-
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/control/terminate`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${auth.workerToken}`,
-      },
-    });
-    if (!res.ok) {
-      clearStaleWorkerRuntime(session.id);
-      logger.warn(`Failed to terminate worker for ${session.name}: HTTP ${res.status}`);
-    }
-  } catch (err: any) {
-    clearStaleWorkerRuntime(session.id);
-    logger.warn(`Failed to terminate worker for ${session.name}: ${err.message}`);
-  }
-
-  cleanupRegisteredChannelServer(session, session.transportKind === 'channel');
-}
-
-async function readWorkerPort(sessionId: string): Promise<number | null> {
-  const workerStatePath = getWorkerStatePath(sessionId);
-  try {
-    const raw = JSON.parse(await (await import('fs/promises')).readFile(workerStatePath, 'utf-8')) as {
-      port?: number;
-    };
-    return typeof raw.port === 'number' ? raw.port : null;
-  } catch {
-    return null;
-  }
+  const controlState = readWorkerControlState(session.id);
+  await terminateSessionWorkerWithContext(session, {
+    auth,
+    controlState,
+    requestTerminate: requestWorkerTerminate,
+    terminateProcess: terminateWorkerProcess,
+    clearRuntime: clearStaleWorkerRuntime,
+    cleanupRegisteredChannelServer,
+    logger,
+  });
 }
 
 function appendLaunchMarker(logPath: string, workerId: string, mode: WorkerLaunchMode): void {
@@ -238,6 +385,7 @@ function appendLaunchMarker(logPath: string, workerId: string, mode: WorkerLaunc
 }
 
 function clearStaleWorkerRuntime(sessionId: string): void {
+  clearWorkerRuntime(sessionId);
   updateSessionRuntime(sessionId, {
     workerId: null,
     terminalHandle: null,
@@ -250,6 +398,7 @@ function clearStaleWorkerRuntime(sessionId: string): void {
 function writeLaunchFailureState(input: {
   sessionId: string;
   workerId: string;
+  activeBackend: Session['activeBackend'];
   workerStatePath: string;
   stdoutLogPath: string;
   stderrLogPath: string;
@@ -260,9 +409,11 @@ function writeLaunchFailureState(input: {
   const state: WorkerStateFile = {
     sessionId: input.sessionId,
     workerId: input.workerId,
+    runtimeBuildId,
     port: null,
     pid: null,
     claudePid: null,
+    activeBackend: input.activeBackend,
     terminalBackend: input.terminalBackend,
     terminalHandle: null,
     workerStatus: 'exited',

@@ -1,4 +1,4 @@
-# Deployment
+# CC Conductor Deployment
 
 ## Visual Overview
 
@@ -27,7 +27,7 @@ flowchart LR
 Optional only:
 
 - `tmux` for the legacy backend
-- Bun for legacy plugin experiments
+- npm for the legacy plugin experiments in `plugin/discord-autopair/`
 
 ## Important Behavior
 

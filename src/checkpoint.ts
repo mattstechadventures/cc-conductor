@@ -1,7 +1,8 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
-import { Client, TextChannel } from 'discord.js';
+import { Client } from 'discord.js';
 import type { Checkpoint, CheckpointMessage, Session } from './types.js';
+import { fetchRecentSessionMessages } from './handoff.js';
 import { logger } from './logger.js';
 import { updateCheckpoint } from './sessions.js';
 import { getCheckpointPath } from './state.js';
@@ -9,7 +10,7 @@ import { getCheckpointPath } from './state.js';
 export async function writeCheckpoint(session: Session, discordClient: Client): Promise<string> {
   const checkpointPath = getCheckpointPath(session.projectDir);
   const messageCount = parseInt(process.env.CHECKPOINT_DISCORD_MESSAGES || '50', 10);
-  const recentMessages = await fetchDiscordMessages(session.discordChannelId, discordClient, messageCount);
+  const recentMessages = await fetchRecentSessionMessages(session, discordClient, messageCount);
   const { branch: gitBranch, lastCommit: gitLastCommit } = readGitState(session.projectDir);
 
   const checkpoint: Checkpoint = {
@@ -69,29 +70,6 @@ export async function flushAllCheckpoints(sessions: Session[], discordClient: Cl
   const failed = results.filter(result => result.status === 'rejected').length;
   if (failed > 0) {
     logger.warn(`${failed}/${sessions.length} checkpoint flushes failed`);
-  }
-}
-
-async function fetchDiscordMessages(
-  channelId: string,
-  client: Client,
-  count: number
-): Promise<CheckpointMessage[]> {
-  try {
-    const channel = await client.channels.fetch(channelId);
-    if (!channel || !(channel instanceof TextChannel)) return [];
-
-    const messages = await channel.messages.fetch({ limit: Math.min(count, 100) });
-    return messages
-      .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-      .map(message => ({
-        author: message.author.bot ? 'claude' : message.author.displayName || message.author.username,
-        content: message.content,
-        timestamp: message.createdTimestamp,
-      }));
-  } catch (err: any) {
-    logger.error(`Failed to fetch Discord messages for channel ${channelId}: ${err.message}`);
-    return [];
   }
 }
 

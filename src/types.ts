@@ -1,7 +1,9 @@
 export type SessionStatus = 'starting' | 'active' | 'idle' | 'interrupted' | 'dead';
+export type AgentBackend = 'claude' | 'codex';
+export type BackendState = 'never_started' | 'active' | 'parked';
 export type IndicatorMode = 'off' | 'typing';
-export type TerminalBackend = 'pty' | 'tmux';
-export type TransportKind = 'channel' | 'pty_fallback' | 'tmux_polling';
+export type TerminalBackend = 'pty' | 'tmux' | 'none';
+export type TransportKind = 'channel' | 'pty_fallback' | 'tmux_polling' | 'worker_http';
 export type TransportState = 'connected' | 'degraded' | 'disconnected';
 export type WorkerStatus = 'starting' | 'ready' | 'stopped' | 'exited' | 'unknown';
 export type WorkerLaunchMode = 'new' | 'resume' | 'resume-prompt';
@@ -34,9 +36,25 @@ export interface Session {
   terminalHandle: string | null;
   transportKind: TransportKind;
   transportState: TransportState;
+  activeBackend: AgentBackend;
+  backendStates: SessionBackendSummary[];
   claudeSessionName: string;
   claudeResumeRef: string | null;
   workerStatus: WorkerStatus;
+}
+
+export interface SessionBackend {
+  sessionId: string;
+  backend: AgentBackend;
+  nativeSessionName: string | null;
+  nativeResumeRef: string | null;
+  state: BackendState;
+  lastActiveAt: number | null;
+  lastHandoffAt: number | null;
+}
+
+export interface SessionBackendSummary extends SessionBackend {
+  resumable: boolean;
 }
 
 export interface Checkpoint {
@@ -60,6 +78,7 @@ export interface SpawnRequest {
   name: string;
   projectDir?: string;
   requestedBy: string;
+  agentBackend?: AgentBackend;
   resumeFromCheckpoint?: string;
 }
 
@@ -72,13 +91,25 @@ export interface ResumeResult {
   checkpointUsed: boolean;
   messagesInjected: number;
   resumePromptLength: number;
-  resumeStrategy: 'cli' | 'checkpoint';
+  resumeStrategy: 'cli' | 'checkpoint' | 'worker';
 }
 
 export interface AddDirResult {
   session: Session;
   addedDir: string;
-  resumeStrategy: 'cli' | 'checkpoint';
+  resumeStrategy: 'cli' | 'checkpoint' | 'worker';
+}
+
+export interface SwitchBackendRequest {
+  backend: AgentBackend;
+}
+
+export interface SwitchBackendResult {
+  session: Session;
+  previousBackend: AgentBackend;
+  activeBackend: AgentBackend;
+  handoffPromptLength: number;
+  inactiveBackendParked: boolean;
 }
 
 export interface DaemonResponse<T = unknown> {
@@ -101,9 +132,11 @@ export interface SessionInternalAuth {
 
 export interface WorkerRegistration {
   workerId: string;
+  runtimeBuildId: string;
   port: number;
   pid: number;
   claudePid: number | null;
+  activeBackend: AgentBackend;
   terminalHandle: string | null;
   terminalBackend: TerminalBackend;
   workerStatus: WorkerStatus;
@@ -112,9 +145,11 @@ export interface WorkerRegistration {
 export interface WorkerStateFile {
   sessionId: string;
   workerId: string;
+  runtimeBuildId: string;
   port: number | null;
   pid: number | null;
   claudePid: number | null;
+  activeBackend: AgentBackend;
   terminalBackend: TerminalBackend;
   terminalHandle: string | null;
   workerStatus: WorkerStatus;
@@ -137,9 +172,11 @@ export interface WorkerStartResult {
 
 export interface WorkerHeartbeat {
   workerId: string;
+  runtimeBuildId: string;
   port: number;
   pid: number;
   claudePid: number | null;
+  activeBackend: AgentBackend;
   terminalHandle: string | null;
   terminalBackend: TerminalBackend;
   workerStatus: WorkerStatus;

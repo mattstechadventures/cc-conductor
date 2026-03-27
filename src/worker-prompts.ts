@@ -1,6 +1,8 @@
 const OSC_PATTERN = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
 const CSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const ESC_PATTERN = /\u001b[@-Z\\-_]/g;
+const MODAL_OPTION_PATTERN = /^(?:[>❯]\s*)?\d+\.\s+\S/i;
+const MODAL_FOOTER_PATTERN = /(esc to cancel|enter to confirm|tab to amend)/i;
 
 export interface WorkerPromptSignals {
   isTrustPrompt: boolean;
@@ -10,12 +12,23 @@ export interface WorkerPromptSignals {
   permissionPromptAction: 'enter' | 'down-enter' | null;
   blockedDirectoryPath: string | null;
   isReadyPrompt: boolean;
+  isBlockingModal: boolean;
+  isUnknownBlockingModal: boolean;
+  blockingModalSignature: string | null;
 }
 
 export function analyzeTerminalOutput(output: string): WorkerPromptSignals {
   const normalizedOutput = normalizeTerminalOutput(output);
-  const lastFewLines = normalizedOutput.trimEnd().split('\n').slice(-12).join('\n');
+  const recentLines = getRecentPromptLines(normalizedOutput);
+  const lastFewLines = recentLines.slice(-12).join('\n');
   const compactOutput = compactPromptText(lastFewLines);
+  const blockingModalSignature = extractBlockingModalSignature(recentLines);
+  const hasDontAskAgainOption =
+    compactOutput.includes("yes,anddon'taskagainfor") ||
+    compactOutput.includes('yes,anddontaskagainfor');
+  const isSettingsEditApprovalPrompt =
+    compactOutput.includes('doyouwanttomakethiseditto') &&
+    compactOutput.includes('allowclaudetoedititsownsettingsforthissession');
 
   const isTrustPrompt =
     compactOutput.includes('quicksafetycheck:') &&
@@ -32,7 +45,9 @@ export function analyzeTerminalOutput(output: string): WorkerPromptSignals {
 
   const permissionPromptAction =
     compactOutput.includes('doyouwanttoproceed?') &&
-    compactOutput.includes('yes,anddon\'taskagainfor')
+    hasDontAskAgainOption
+      ? 'enter'
+      : isSettingsEditApprovalPrompt
       ? 'enter'
       : compactOutput.includes('yes,iaccept') && compactOutput.includes('no,exit')
         ? 'down-enter'
@@ -58,6 +73,14 @@ export function analyzeTerminalOutput(output: string): WorkerPromptSignals {
     !compactOutput.includes('simmering') &&
     !isOutsideAllowedDirectoryPrompt &&
     !isPermissionPrompt;
+  const isBlockingModal = blockingModalSignature !== null;
+  const isUnknownBlockingModal =
+    isBlockingModal &&
+    !isTrustPrompt &&
+    !isDevelopmentChannelPrompt &&
+    !isPermissionPrompt &&
+    !isOutsideAllowedDirectoryPrompt &&
+    !isReadyPrompt;
 
   return {
     isTrustPrompt,
@@ -67,6 +90,9 @@ export function analyzeTerminalOutput(output: string): WorkerPromptSignals {
     permissionPromptAction,
     blockedDirectoryPath,
     isReadyPrompt,
+    isBlockingModal,
+    isUnknownBlockingModal,
+    blockingModalSignature,
   };
 }
 
@@ -80,6 +106,47 @@ export function normalizeTerminalOutput(output: string): string {
 
 function compactPromptText(output: string): string {
   return output.toLowerCase().replace(/\s+/g, '');
+}
+
+function getRecentPromptLines(output: string, maxLines = 24): string[] {
+  return output
+    .trimEnd()
+    .split('\n')
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(-maxLines);
+}
+
+function extractBlockingModalSignature(lines: string[]): string | null {
+  const optionLines = lines.filter(line => MODAL_OPTION_PATTERN.test(line));
+  if (optionLines.length < 2) {
+    return null;
+  }
+
+  const titleLines = lines.filter(line =>
+    line.endsWith('?') ||
+    /^use skill /i.test(line) ||
+    /^edit file$/i.test(line) ||
+    /^do you want /i.test(line)
+  );
+  const footerLines = lines.filter(line => MODAL_FOOTER_PATTERN.test(line));
+  if (titleLines.length === 0 && footerLines.length === 0) {
+    return null;
+  }
+
+  const signatureParts = [
+    ...titleLines.slice(-2),
+    ...optionLines.slice(-3),
+    ...footerLines.slice(-1),
+  ]
+    .map(normalizeModalSignatureLine)
+    .filter(Boolean);
+
+  return signatureParts.length > 0 ? [...new Set(signatureParts)].join('|') : null;
+}
+
+function normalizeModalSignatureLine(line: string): string {
+  return compactPromptText(line.replace(/^(?:[>❯]\s*)?\d+\.\s*/, ''));
 }
 
 function extractBlockedDirectoryPath(output: string): string | null {

@@ -16,6 +16,7 @@ test('development channel consent is not treated as a ready prompt', () => {
   assert.equal(signals.isDevelopmentChannelPrompt, true);
   assert.equal(signals.isOutsideAllowedDirectoryPrompt, false);
   assert.equal(signals.isReadyPrompt, false);
+  assert.equal(signals.isUnknownBlockingModal, false);
 });
 
 test('startup prompts are detected even when ANSI cursor movement collapses spaces', () => {
@@ -31,6 +32,7 @@ test('startup prompts are detected even when ANSI cursor movement collapses spac
   assert.equal(signals.isDevelopmentChannelPrompt, true);
   assert.equal(signals.isOutsideAllowedDirectoryPrompt, false);
   assert.equal(signals.isReadyPrompt, false);
+  assert.equal(signals.isUnknownBlockingModal, false);
 });
 
 test('current MCP approval prompt is detected and accepted with enter', () => {
@@ -46,6 +48,59 @@ test('current MCP approval prompt is detected and accepted with enter', () => {
   assert.equal(signals.isOutsideAllowedDirectoryPrompt, false);
   assert.equal(signals.permissionPromptAction, 'enter');
   assert.equal(signals.isReadyPrompt, false);
+  assert.equal(signals.isUnknownBlockingModal, false);
+});
+
+test('update-config skill approval is detected as a safe one-time approval', () => {
+  const output = [
+    'Use skill "update-config"?',
+    'Claude may use instructions, code, or files from this Skill.',
+    'Do you want to proceed?',
+    '❯ 1. Yes',
+    "2. Yes, and don't ask again for update-config in D:\\Repositories\\bookshelf",
+    '3. No',
+    'Esc to cancel · Tab to amend',
+  ].join('\n');
+
+  const signals = analyzeTerminalOutput(output);
+  assert.equal(signals.isPermissionPrompt, true);
+  assert.equal(signals.permissionPromptAction, 'enter');
+  assert.equal(signals.isUnknownBlockingModal, false);
+  assert.match(signals.blockingModalSignature || '', /useskill"update-config"\?/);
+});
+
+test('settings approval prompt is detected as a safe one-time approval', () => {
+  const output = [
+    'Edit file',
+    'C:\\Users\\claed\\.claude\\settings.json',
+    'Do you want to make this edit to settings.json?',
+    '❯ 1. Yes',
+    '2. Yes, and allow Claude to edit its own settings for this session',
+    '3. No',
+    'Esc to cancel · Tab to amend',
+  ].join('\n');
+
+  const signals = analyzeTerminalOutput(output);
+  assert.equal(signals.isPermissionPrompt, true);
+  assert.equal(signals.permissionPromptAction, 'enter');
+  assert.equal(signals.isUnknownBlockingModal, false);
+});
+
+test('unknown blocking modals are classified separately from known-safe approvals', () => {
+  const output = [
+    'Use skill "something-new"?',
+    'Claude may use instructions, code, or files from this Skill.',
+    'Do you want to proceed?',
+    '❯ 1. Yes',
+    '2. No',
+    'Esc to cancel · Tab to amend',
+  ].join('\n');
+
+  const signals = analyzeTerminalOutput(output);
+  assert.equal(signals.isPermissionPrompt, false);
+  assert.equal(signals.isOutsideAllowedDirectoryPrompt, false);
+  assert.equal(signals.isUnknownBlockingModal, true);
+  assert.match(signals.blockingModalSignature || '', /useskill"something-new"\?/);
 });
 
 test('ready prompt wins once live Claude UI is visible in the same buffer', () => {
@@ -78,6 +133,7 @@ test('outside-directory access prompts are classified separately from internal a
   assert.equal(signals.isPermissionPrompt, false);
   assert.equal(signals.permissionPromptAction, null);
   assert.equal(signals.isReadyPrompt, false);
+  assert.equal(signals.isUnknownBlockingModal, false);
 });
 
 test('legacy permission prompt is still detected', () => {
@@ -91,6 +147,7 @@ test('legacy permission prompt is still detected', () => {
   assert.equal(signals.isOutsideAllowedDirectoryPrompt, false);
   assert.equal(signals.permissionPromptAction, 'down-enter');
   assert.equal(signals.isReadyPrompt, false);
+  assert.equal(signals.isUnknownBlockingModal, false);
 });
 
 test('ready prompt is detected once no startup gate is present', () => {
@@ -108,4 +165,5 @@ test('ready prompt is detected once no startup gate is present', () => {
   assert.equal(signals.permissionPromptAction, null);
   assert.equal(signals.blockedDirectoryPath, null);
   assert.equal(signals.isReadyPrompt, true);
+  assert.equal(signals.isUnknownBlockingModal, false);
 });

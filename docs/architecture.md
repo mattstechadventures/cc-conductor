@@ -49,7 +49,7 @@ Each session runs in a detached worker process. The worker owns:
 - the terminal backend, with `node-pty` as the supported default
 - startup readiness detection
 - the session root plus any persisted `additionalDirs`
-- trust, development-channel, and Claude tool approval auto-accept flows
+- development-channel consent auto-accept flow while leaving Claude trust and permission prompts interactive
 - outside-directory prompt rejection and user-visible blocked-path notices
 - session-local worker and terminal diagnostics under `data/sessions/<sessionId>/`
 - local worker control endpoints for fallback input and shutdown

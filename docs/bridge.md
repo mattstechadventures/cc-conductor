@@ -46,7 +46,7 @@ For active sessions with a connected channel server:
 
 Claude replies do not come from terminal capture in this path.
 The registered local-scope server pins the repo-local `tsx` loader by absolute path so channel startup does not depend on the session project's current working directory.
-Worker readiness is held behind Claude's startup gates: folder trust, development-channel consent, and tool approval prompts must clear before the session is treated as ready, and the worker only marks ready once Claude's live session UI is visible.
+Worker readiness is held behind Claude's startup gates: folder trust, development-channel consent, and Claude approval prompts must clear before the session is treated as ready, and the worker only auto-confirms the development-channel consent prompt before marking ready once Claude's live session UI is visible.
 If Claude requests access outside the session root plus `additionalDirs`, the worker dismisses that approval prompt and the daemon posts an explicit Discord notice instead of leaving the session hanging.
 
 ## PTY Fallback

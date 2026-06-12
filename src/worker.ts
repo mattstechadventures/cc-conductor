@@ -80,9 +80,7 @@ let serverPort = 0;
 let ready = false;
 let shuttingDown = false;
 let lastObservedOutput = '';
-let lastTrustActionAt = 0;
 let lastDevelopmentChannelActionAt = 0;
-let lastPermissionActionAt = 0;
 let lastBlockedDirectoryNoticeAt = 0;
 let lastBlockedDirectorySignature = '';
 let lastError: string | null = null;
@@ -254,18 +252,6 @@ function observeOutput(chunk: string): void {
     return;
   }
 
-  if (Date.now() - lastPermissionActionAt > 3_000 && signals.isPermissionPrompt) {
-    lastPermissionActionAt = Date.now();
-    logger.info(`Worker ${workerId} auto-accepted permission prompt`);
-    lastObservedOutput = '';
-    if (signals.permissionPromptAction === 'down-enter') {
-      void sendRawDownAndEnter();
-    } else {
-      void sendEnter();
-    }
-    return;
-  }
-
   if (!ready && signals.isReadyPrompt) {
     ready = true;
     workerStatus = 'ready';
@@ -275,14 +261,6 @@ function observeOutput(chunk: string): void {
       const promptName = path.basename(resumePromptPath);
       void sendMessage(`Read ${promptName} and resume the session described in it. Acknowledge what you were working on.`);
     }
-  }
-
-  if (!ready && Date.now() - lastTrustActionAt > 3_000 && signals.isTrustPrompt) {
-    lastTrustActionAt = Date.now();
-    logger.info(`Worker ${workerId} auto-confirmed trust prompt`);
-    lastObservedOutput = '';
-    void sendEnter();
-    return;
   }
 
   if (!ready && Date.now() - lastDevelopmentChannelActionAt > 3_000 && signals.isDevelopmentChannelPrompt) {
@@ -313,20 +291,6 @@ async function sendEnter(): Promise<void> {
   }
 
   if (!ptyProcess) throw new Error('PTY process is not available');
-  ptyProcess.write('\r');
-}
-
-async function sendRawDownAndEnter(): Promise<void> {
-  if (terminalBackend === 'tmux') {
-    sendTmuxRaw(tmuxSessionName, 'Down');
-    await sleep(300);
-    sendTmuxEnter(tmuxSessionName);
-    return;
-  }
-
-  if (!ptyProcess) throw new Error('PTY process is not available');
-  ptyProcess.write('\x1b[B');
-  await sleep(300);
   ptyProcess.write('\r');
 }
 

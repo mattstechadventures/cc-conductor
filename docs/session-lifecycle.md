@@ -44,11 +44,12 @@ flowchart TD
 6. Spawn the detached worker.
 7. Worker launches Claude Code through the selected terminal backend.
 8. Worker launches Claude with the session root and any persisted `additionalDirs`.
-9. Worker auto-accepts trust, development channel, and Claude tool permission prompts if they appear, including the newer `Do you want to proceed?` approval dialog.
-10. If Claude asks for access outside the allowed directories, the worker dismisses that prompt and posts a Discord notice explaining how to add the path explicitly.
-11. If the worker does not reach ready, Conductor deletes the just-created session row and Discord channel, but keeps `data/sessions/<id>/` for diagnostics.
-12. Worker reports readiness through the daemon internal route.
-13. The daemon marks the session active and posts the ready notice.
+9. Worker auto-accepts only the development-channel consent prompt if it appears.
+10. Folder trust and Claude approval prompts stay interactive so Claude's own safeguards remain in force until an operator clears them in the session terminal.
+11. If Claude asks for access outside the allowed directories, the worker dismisses that prompt and posts a Discord notice explaining how to add the path explicitly.
+12. If the worker does not reach ready, Conductor deletes the just-created session row and Discord channel, but keeps `data/sessions/<id>/` for diagnostics.
+13. Worker reports readiness through the daemon internal route.
+14. The daemon marks the session active and posts the ready notice.
 
 ## Active Behavior
 

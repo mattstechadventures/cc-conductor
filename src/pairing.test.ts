@@ -39,8 +39,6 @@ test('structured transport launches Claude with the session-scoped development c
   assert.deepEqual(plan.args, [
     '--name',
     'test2',
-    '--permission-mode',
-    'acceptEdits',
     '--dangerously-load-development-channels',
     'server:conductor-discord-session-1',
   ]);
@@ -58,8 +56,6 @@ test('additional directories are passed through Claude launch args', () => {
   assert.deepEqual(plan.args, [
     '--name',
     'test2',
-    '--permission-mode',
-    'acceptEdits',
     '--add-dir',
     'D:\\repos',
     '--add-dir',
@@ -76,7 +72,5 @@ test('fallback transport does not request the structured channel bridge', () => 
   assert.deepEqual(plan.args, [
     '--name',
     'test2',
-    '--permission-mode',
-    'acceptEdits',
   ]);
 });

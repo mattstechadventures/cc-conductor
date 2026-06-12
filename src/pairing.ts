@@ -21,8 +21,6 @@ export function buildClaudeLaunch(
     args.push('--name', session.claudeSessionName);
   }
 
-  args.push('--permission-mode', 'acceptEdits');
-
   for (const directory of session.additionalDirs) {
     args.push('--add-dir', directory);
   }
